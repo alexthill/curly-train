@@ -1,0 +1,28 @@
+[package]
+name = "curly-train"
+version = "0.1.0"
+authors = ["Alex Thill"]
+edition = "2021"
+build = "build.rs"
+rust-version = "1.84"
+
+[lib]
+name = "scop_lib"
+path = "src/lib.rs"
+
+[[bin]]
+name = "scop"
+path = "src/main.rs"
+
+[dependencies]
+log = "0.4"
+env_logger = "0.11"
+ash = "0.38"
+ash-window = "0.13"
+raw-window-handle = "0.6"
+cgmath = "0.18"
+image = "0.25"
+tobj = "4.0"
+ahash = "0.8"
+rand = "0.9.0-beta.3"
+winit = "0.30"
