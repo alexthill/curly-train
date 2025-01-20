@@ -43,6 +43,7 @@ impl SwapchainSupportDetails {
         let format = Self::choose_swapchain_surface_format(&self.formats);
         let present_mode = Self::choose_swapchain_surface_present_mode(&self.present_modes);
         let extent = Self::choose_swapchain_extent(self.capabilities, preferred_dimensions);
+        log::debug!("Swapchain format: {format:?}, mode: {present_mode:?}, extent: {extent:?}");
         SwapchainProperties {
             format,
             present_mode,
@@ -64,8 +65,7 @@ impl SwapchainSupportDetails {
             };
         }
 
-        *available_formats
-            .iter()
+        *available_formats.iter()
             .find(|format| {
                 format.format == vk::Format::B8G8R8A8_UNORM
                     && format.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR
@@ -76,16 +76,14 @@ impl SwapchainSupportDetails {
     /// Choose the swapchain present mode.
     ///
     /// Will favor MAILBOX if present otherwise FIFO.
-    /// If none is present it will fallback to IMMEDIATE.
     fn choose_swapchain_surface_present_mode(
         available_present_modes: &[vk::PresentModeKHR],
     ) -> vk::PresentModeKHR {
         if available_present_modes.contains(&vk::PresentModeKHR::MAILBOX) {
             vk::PresentModeKHR::MAILBOX
-        } else if available_present_modes.contains(&vk::PresentModeKHR::FIFO) {
-            vk::PresentModeKHR::FIFO
         } else {
-            vk::PresentModeKHR::IMMEDIATE
+            // The vulkan spec requires FIFO to be supported.
+            vk::PresentModeKHR::FIFO
         }
     }
 

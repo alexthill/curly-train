@@ -81,11 +81,10 @@ impl VkContext {
         })
     }
 
-    /// Return the maximim sample count supported.
+    /// Return the maximum sample count supported.
     pub fn get_max_usable_sample_count(&self) -> vk::SampleCountFlags {
         let props = unsafe {
-            self.instance
-                .get_physical_device_properties(self.physical_device)
+            self.instance.get_physical_device_properties(self.physical_device)
         };
         let color_sample_counts = props.limits.framebuffer_color_sample_counts;
         let depth_sample_counts = props.limits.framebuffer_depth_sample_counts;

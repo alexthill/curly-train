@@ -113,6 +113,7 @@ impl VkApp {
             Self::create_swapchain_image_views(vk_context.device(), &images, properties);
 
         let msaa_samples = vk_context.get_max_usable_sample_count();
+        log::debug!("Chosen msaa: {msaa_samples:?}");
         let depth_format = Self::find_depth_format(&vk_context);
 
         let render_pass =
@@ -1877,6 +1878,11 @@ impl VkApp {
         unsafe { self.vk_context.device().device_wait_idle().unwrap() };
     }
 
+    /// Draws a frame.
+    ///
+    /// #Returns
+    ///
+    /// True if the swapchain is dirty and needs to be recreated.
     pub fn draw_frame(&mut self) -> bool {
         log::trace!("Drawing frame.");
         let sync_objects = self.in_flight_frames.next().unwrap();
@@ -1932,27 +1938,19 @@ impl VkApp {
 
         let swapchains = [self.swapchain_khr];
         let images_indices = [image_index];
-
-        {
-            let present_info = vk::PresentInfoKHR::default()
-                .wait_semaphores(&signal_semaphores)
-                .swapchains(&swapchains)
-                .image_indices(&images_indices);
-            // .results() null since we only have one swapchain
-            let result = unsafe {
-                self.swapchain
-                    .queue_present(self.present_queue, &present_info)
-            };
-            match result {
-                Ok(true) | Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
-                    return true;
-                }
-                Err(error) => panic!("Failed to present queue. Cause: {}", error),
-                _ => {}
-            }
+        let present_info = vk::PresentInfoKHR::default()
+            .wait_semaphores(&signal_semaphores)
+            .swapchains(&swapchains)
+            .image_indices(&images_indices);
+        // .results() null since we only have one swapchain
+        let result = unsafe {
+            self.swapchain.queue_present(self.present_queue, &present_info)
+        };
+        match result {
+            Ok(value) => value,
+            Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => true,
+            Err(error) => panic!("Failed to present queue. Cause: {}", error),
         }
-
-        false
     }
 
     /// Recreates the swapchain.
