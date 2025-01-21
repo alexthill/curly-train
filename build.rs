@@ -1,89 +1,34 @@
-use std::{
-    env::var,
-    ffi::OsStr,
-    fs,
-    io::Result,
-    path::{Path, PathBuf},
-    process::{Command, Output},
-};
+use std::path::Path;
+use std::process::Command;
 
 fn main() {
-    if !should_skip_shader_compilation() {
-        compile_shaders();
-    }
-}
+    let shaders = vec![
+        "shader.vert",
+        "shader.frag",
+    ];
 
-fn should_skip_shader_compilation() -> bool {
-    var("SKIP_SHADER_COMPILATION")
-        .map(|var| var.parse::<bool>().unwrap_or(false))
-        .unwrap_or(false)
-}
+    let src_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets").join("shaders");
+    let out_dir = std::env::var("OUT_DIR").unwrap();
 
-fn compile_shaders() {
-    println!("Compiling shaders");
+    for shader in shaders {
+        let input_path = src_dir.join(shader);
+        let output_path = Path::new(&out_dir).join(format!("{}.spv", shader));
 
-    let shader_dir_path = get_shader_source_dir_path();
+        let output = Command::new("glslangValidator")
+            .arg("-V")
+            .arg(input_path.to_str().unwrap())
+            .arg("-o")
+            .arg(output_path.to_str().unwrap())
+            .output()
+            .expect("Failed to execute glslangValidator");
 
-    fs::read_dir(shader_dir_path.clone())
-        .unwrap()
-        .map(Result::unwrap)
-        .filter(|dir| dir.file_type().unwrap().is_file())
-        .filter(|dir| dir.path().extension() != Some(OsStr::new("spv")))
-        .for_each(|dir| {
-            let path = dir.path();
-            let name = path.file_name().unwrap().to_str().unwrap();
-            let output_name = format!("{}.spv", &name);
-            println!("Found file {:?}.\nCompiling...", path.as_os_str());
-
-            let result = Command::new("glslangValidator")
-                .current_dir(&shader_dir_path)
-                .arg("-V")
-                .arg(&path)
-                .arg("-o")
-                .arg(output_name)
-                .output();
-
-            handle_program_result(result);
-        })
-}
-
-fn get_shader_source_dir_path() -> PathBuf {
-    let path = get_root_path().join("assets").join("shaders");
-    println!("Shader source directory: {:?}", path.as_os_str());
-    path
-}
-
-fn get_root_path() -> &'static Path {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-}
-
-fn handle_program_result(result: Result<Output>) {
-    match result {
-        Ok(output) => {
-            if output.status.success() {
-                println!("Shader compilation succedeed.");
-                print!(
-                    "stdout: {}",
-                    String::from_utf8(output.stdout)
-                        .unwrap_or("Failed to print program stdout".to_string())
-                );
-            } else {
-                eprintln!("Shader compilation failed. Status: {}", output.status);
-                eprint!(
-                    "stdout: {}",
-                    String::from_utf8(output.stdout)
-                        .unwrap_or("Failed to print program stdout".to_string())
-                );
-                eprint!(
-                    "stderr: {}",
-                    String::from_utf8(output.stderr)
-                        .unwrap_or("Failed to print program stderr".to_string())
-                );
-                panic!("Shader compilation failed. Status: {}", output.status);
-            }
+        if !output.status.success() {
+            panic!(
+                "glslangValidator failed with error: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
         }
-        Err(error) => {
-            panic!("Failed to compile shader. Cause: {}", error);
-        }
+
+        println!("cargo:rerun-if-changed={}", input_path.to_str().unwrap());
     }
 }

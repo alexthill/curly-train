@@ -15,7 +15,9 @@ use ash::{
 use cgmath::{Deg, Matrix4, Point3, Vector3};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use std::{
+    error::Error,
     ffi::{CStr, CString},
+    io::Cursor,
     mem::{align_of, size_of, size_of_val},
 };
 use winit::window::Window;
@@ -757,11 +759,25 @@ impl VkApp {
         render_pass: vk::RenderPass,
         descriptor_set_layout: vk::DescriptorSetLayout,
     ) -> (vk::Pipeline, vk::PipelineLayout) {
-        let vertex_source = Self::read_shader_from_file("shaders/shader.vert.spv");
-        let fragment_source = Self::read_shader_from_file("shaders/shader.frag.spv");
+        fn create_shader_module(
+            device: &Device,
+            bytes: &[u8],
+        ) -> Result<vk::ShaderModule, Box<dyn Error>> {
+            let mut cursor = Cursor::new(bytes);
+            let code = ash::util::read_spv(&mut cursor)?;
+            let create_info = vk::ShaderModuleCreateInfo::default().code(&code);
+            unsafe {
+                Ok(device.create_shader_module(&create_info, None)?)
+            }
+        }
 
-        let vertex_shader_module = Self::create_shader_module(device, &vertex_source);
-        let fragment_shader_module = Self::create_shader_module(device, &fragment_source);
+        let vertex_spv = include_bytes!(concat!(env!("OUT_DIR"), "/shader.vert.spv"));
+        let vertex_shader_module = create_shader_module(device, vertex_spv)
+            .expect("failed to load vertex shader spv file");
+
+        let frag_spv = include_bytes!(concat!(env!("OUT_DIR"), "/shader.frag.spv"));
+        let fragment_shader_module = create_shader_module(device, frag_spv)
+            .expect("failed to load fragment shader spv file");
 
         let entry_point_name = CString::new("main").unwrap();
         let vertex_shader_state_info = vk::PipelineShaderStageCreateInfo::default()
@@ -880,17 +896,6 @@ impl VkApp {
         };
 
         (pipeline, layout)
-    }
-
-    fn read_shader_from_file<P: AsRef<std::path::Path>>(path: P) -> Vec<u32> {
-        log::debug!("Loading shader file {}", path.as_ref().to_str().unwrap());
-        let mut cursor = fs::load(path);
-        ash::util::read_spv(&mut cursor).unwrap()
-    }
-
-    fn create_shader_module(device: &Device, code: &[u32]) -> vk::ShaderModule {
-        let create_info = vk::ShaderModuleCreateInfo::default().code(code);
-        unsafe { device.create_shader_module(&create_info, None).unwrap() }
     }
 
     fn create_framebuffers(
