@@ -1,6 +1,7 @@
 use crate::fs;
-use crate::math;
 use crate::camera::*;
+use crate::math;
+use crate::obj::Obj;
 use super::context::VkContext;
 use super::debug::*;
 use super::structs::{Vertex, UniformBufferObject};
@@ -1478,42 +1479,26 @@ impl VkApp {
     }
 
     fn load_model() -> (Vec<Vertex>, Vec<u32>) {
+        use rand::prelude::*;
+
         log::debug!("Loading model.");
-        let mut cursor = fs::load("models/chalet.obj");
-        let (models, _) = tobj::load_obj_buf(
-            &mut cursor,
-            &tobj::LoadOptions {
-                single_index: true,
-                triangulate: true,
-                ..Default::default()
-            },
-            |_| Ok((vec![], ahash::AHashMap::new())),
-        )
-        .unwrap();
+        let cursor = fs::load("models/42.obj");
+        let obj = Obj::from_reader(cursor).expect("failed to load model");
+        let nobj = obj.normalize().expect("failed to normalize model");
 
-        let mesh = &models[0].mesh;
-        let positions = mesh.positions.as_slice();
-        let coords = mesh.texcoords.as_slice();
-        let vertex_count = mesh.positions.len() / 3;
-        log::debug!("Model has {vertex_count} vertices.");
-
-        let mut vertices = Vec::with_capacity(vertex_count);
-        for i in 0..vertex_count {
-            let x = positions[i * 3];
-            let y = positions[i * 3 + 1];
-            let z = positions[i * 3 + 2];
-            let u = coords[i * 2];
-            let v = coords[i * 2 + 1];
-
-            let vertex = Vertex {
-                pos: [x, y, z],
-                color: [1.0, 1.0, 1.0],
-                coords: [u, v],
-            };
-            vertices.push(vertex);
-        }
-
-        (vertices, mesh.indices.clone())
+        let mut rng = rand::rng();
+        let vertices = nobj.vertices.iter().map(|vertex| {
+            let r = rng.random_range(0. .. 1.);
+            let g = rng.random_range(0. .. 1.);
+            let b = rng.random_range(0. .. 1.);
+            Vertex {
+                pos: vertex.pos_coords,
+                color: [r, g, b],
+                //color: [1.0, 1.0, 1.0],
+                coords: vertex.tex_coords,
+            }
+        }).collect();
+        (vertices, nobj.indices.clone())
     }
 
     fn create_buffer_with_data<T, D: Copy>(
