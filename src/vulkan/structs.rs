@@ -1,5 +1,5 @@
 use ash::vk;
-use cgmath::Matrix4;
+use cgmath::{Matrix4, Point3, Vector3};
 use std::mem::offset_of;
 
 #[derive(Clone, Copy)]
@@ -55,5 +55,21 @@ impl UniformBufferObject {
             .descriptor_count(1)
             .stage_flags(vk::ShaderStageFlags::VERTEX)
         // .immutable_samplers() null since we're not creating a sampler descriptor
+    }
+
+    pub fn view_matrix() -> Matrix4<f32> {
+        Matrix4::look_at_rh(
+            Point3::new(0., 0., 3.),
+            Point3::new(0., 0., 0.),
+            Vector3::new(0., 1., 0.),
+        )
+    }
+
+    pub fn model_matrix(extent_min: Vector3<f32>, extent_max: Vector3<f32>) -> Matrix4<f32> {
+        let model_sizes = extent_max - extent_min;
+        let max_size = model_sizes.x.max(model_sizes.y).max(model_sizes.z);
+        let scale = Matrix4::from_scale(1. / max_size);
+        let translate = Matrix4::from_translation(-extent_min - model_sizes / 2.);
+        scale * translate
     }
 }

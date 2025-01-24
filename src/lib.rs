@@ -1,4 +1,3 @@
-mod camera;
 mod fs;
 mod math;
 

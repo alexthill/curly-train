@@ -1,5 +1,4 @@
 use crate::fs;
-use crate::camera::*;
 use crate::math;
 use crate::obj::Obj;
 use super::context::VkContext;
@@ -13,7 +12,7 @@ use ash::{
     khr::{surface, swapchain as khr_swapchain},
     vk, Device, Entry, Instance,
 };
-use cgmath::{Deg, Matrix4, Point3, Vector3};
+use cgmath::{Deg, Matrix4, Vector3};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use std::{
     error::Error,
@@ -23,17 +22,18 @@ use std::{
 };
 use winit::window::Window;
 
+type Vec3 = Vector3<f32>;
+
 const MAX_FRAMES_IN_FLIGHT: u32 = 2;
 
 pub struct VkApp {
-    pub is_left_clicked: bool,
-    pub cursor_position: [i32; 2],
-    pub cursor_delta: Option<[i32; 2]>,
-    pub wheel_delta: Option<f32>,
     pub dirty_swapchain: bool,
 
     resize_dimensions: Option<[u32; 2]>,
-    camera: Camera,
+    pub view_matrix: Matrix4<f32>,
+    pub model_matrix: Matrix4<f32>,
+    #[allow(unused)]
+    model_extent: (Vec3, Vec3),
 
     vk_context: VkContext,
     queue_families_indices: QueueFamiliesIndices,
@@ -169,7 +169,7 @@ impl VkApp {
 
         let texture = Self::create_texture_image(&vk_context, command_pool, graphics_queue);
 
-        let (vertices, indices) = Self::load_model();
+        let (vertices, indices, model_extent) = Self::load_model();
         let (vertex_buffer, vertex_buffer_memory) = Self::create_buffer_with_data::<u32, _>(
             &vk_context,
             transient_command_pool,
@@ -212,11 +212,9 @@ impl VkApp {
 
         Self {
             resize_dimensions: None,
-            camera: Default::default(),
-            is_left_clicked: false,
-            cursor_position: [0, 0],
-            cursor_delta: None,
-            wheel_delta: None,
+            view_matrix: UniformBufferObject::view_matrix(),
+            model_matrix: UniformBufferObject::model_matrix(model_extent.0, model_extent.1),
+            model_extent,
             dirty_swapchain: false,
             vk_context,
             queue_families_indices,
@@ -1478,7 +1476,7 @@ impl VkApp {
         );
     }
 
-    fn load_model() -> (Vec<Vertex>, Vec<u32>) {
+    fn load_model() -> (Vec<Vertex>, Vec<u32>, (Vec3, Vec3)) {
         use rand::prelude::*;
 
         log::debug!("Loading model.");
@@ -1487,7 +1485,13 @@ impl VkApp {
         let nobj = obj.normalize().expect("failed to normalize model");
 
         let mut rng = rand::rng();
+        let mut min = Vec3::new(f32::MAX, f32::MAX, f32::MAX);
+        let mut max = Vec3::new(f32::MIN, f32::MIN, f32::MIN);
         let vertices = nobj.vertices.iter().map(|vertex| {
+            for (i, &coord) in vertex.pos_coords.iter().enumerate() {
+                min[i] = min[i].min(coord);
+                max[i] = max[i].max(coord);
+            }
             let r = rng.random_range(0. .. 1.);
             let g = rng.random_range(0. .. 1.);
             let b = rng.random_range(0. .. 1.);
@@ -1498,7 +1502,8 @@ impl VkApp {
                 coords: vertex.tex_coords,
             }
         }).collect();
-        (vertices, nobj.indices.clone())
+        println!("{min:#?} {max:#?}");
+        (vertices, nobj.indices.clone(), (min, max))
     }
 
     fn create_buffer_with_data<T, D: Copy>(
@@ -2055,27 +2060,11 @@ impl VkApp {
     }
 
     fn update_uniform_buffers(&mut self, current_image: u32) {
-        if self.is_left_clicked && self.cursor_delta.is_some() {
-            let delta = self.cursor_delta.take().unwrap();
-            let x_ratio = delta[0] as f32 / self.swapchain_properties.extent.width as f32;
-            let y_ratio = delta[1] as f32 / self.swapchain_properties.extent.height as f32;
-            let theta = x_ratio * 180.0_f32.to_radians();
-            let phi = y_ratio * 90.0_f32.to_radians();
-            self.camera.rotate(theta, phi);
-        }
-        if let Some(wheel_delta) = self.wheel_delta {
-            self.camera.forward(wheel_delta * 0.3);
-        }
-
         let aspect = self.swapchain_properties.extent.width as f32
             / self.swapchain_properties.extent.height as f32;
         let ubo = UniformBufferObject {
-            model: Matrix4::from_angle_x(Deg(270.0)),
-            view: Matrix4::look_at_rh(
-                self.camera.position(),
-                Point3::new(0.0, 0.0, 0.0),
-                Vector3::new(0.0, 1.0, 0.0),
-            ),
+            model: self.model_matrix,
+            view: self.view_matrix,
             proj: math::perspective(Deg(45.0), aspect, 0.1, 10.0),
         };
         let ubos = [ubo];
@@ -2091,6 +2080,10 @@ impl VkApp {
             align.copy_from_slice(&ubos);
             device.unmap_memory(buffer_mem);
         }
+    }
+
+    pub fn get_extent(&self) -> vk::Extent2D {
+        self.swapchain_properties.extent
     }
 }
 
