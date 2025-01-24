@@ -9,6 +9,9 @@ use winit::{
     keyboard::{Key, KeyCode, NamedKey, PhysicalKey},
     window::{Window, WindowId},
 };
+use std::fs;
+use std::io;
+use std::path::PathBuf;
 use std::time::Instant;
 
 const WIDTH: u32 = 800;
@@ -45,10 +48,40 @@ struct App {
 
     pressed: KeyStates,
     toggle_rotate: bool,
+    load_prev_model: bool,
+    load_next_model: bool,
     is_left_clicked: bool,
     cursor_position: Option<[i32; 2]>,
     cursor_delta: [i32; 2],
     wheel_delta: f32,
+
+    curr_model: usize,
+}
+
+impl App {
+    fn get_model_path(curr_model: &mut usize, offset_to_curr: isize) -> Result<PathBuf, io::Error> {
+        let mut models = fs::read_dir("assets/models")?
+            .filter_map(|path| {
+                let path = path.ok()?;
+                if !path.file_type().ok()?.is_file() {
+                    return None;
+                }
+                let path = path.path();
+                if path.extension()? != "obj" {
+                    return None;
+                }
+                Some(path)
+            })
+            .collect::<Vec<_>>();
+        if models.is_empty() {
+            return Err(io::Error::new(io::ErrorKind::Other, "no .obj file found"));
+        }
+        models.sort();
+        // take euclidian remainder and not modulus to get a positive value
+        *curr_model = (*curr_model as isize + offset_to_curr)
+            .rem_euclid(models.len() as isize) as usize;
+        Ok(models[*curr_model].clone())
+    }
 }
 
 impl ApplicationHandler for App {
@@ -61,7 +94,16 @@ impl ApplicationHandler for App {
             )
             .unwrap();
 
-        self.vulkan = Some(VkApp::new(&window, WIDTH, HEIGHT));
+        let model_path = match Self::get_model_path(&mut self.curr_model, 0) {
+            Ok(path) => path,
+            Err(err) => {
+                log::error!("Failed to find a model: {err}");
+                event_loop.exit();
+                return;
+            }
+        };
+        println!("opening {}", model_path.display());
+        self.vulkan = Some(VkApp::new(&window, WIDTH, HEIGHT, &model_path));
         self.window = Some(window);
     }
 
@@ -83,26 +125,30 @@ impl ApplicationHandler for App {
                 event:
                     KeyEvent {
                         state,
-                        physical_key: PhysicalKey::Code(
-                            key @ (
-                                KeyCode::KeyW | KeyCode::KeyA | KeyCode::KeyS | KeyCode::KeyD
-                                | KeyCode::Space | KeyCode::ShiftLeft
-                                | KeyCode::KeyR
-                            )
-                        ),
+                        logical_key,
+                        physical_key: PhysicalKey::Code(physical_key_code),
                         repeat: false,
                         ..
                     },
                 ..
             } => {
-                match key {
-                    KeyCode::KeyW => self.pressed.forward = state.is_pressed(),
-                    KeyCode::KeyA => self.pressed.left = state.is_pressed(),
-                    KeyCode::KeyS => self.pressed.backward = state.is_pressed(),
-                    KeyCode::KeyD => self.pressed.right = state.is_pressed(),
-                    KeyCode::Space => self.pressed.up = state.is_pressed(),
-                    KeyCode::ShiftLeft => self.pressed.down = state.is_pressed(),
-                    KeyCode::KeyR if state.is_pressed() => self.toggle_rotate = !self.toggle_rotate,
+                let pressed = state.is_pressed();
+                match physical_key_code {
+                    KeyCode::KeyW => self.pressed.forward = pressed,
+                    KeyCode::KeyA => self.pressed.left = pressed,
+                    KeyCode::KeyS => self.pressed.backward = pressed,
+                    KeyCode::KeyD => self.pressed.right = pressed,
+                    KeyCode::Space => self.pressed.up = pressed,
+                    KeyCode::ShiftLeft => self.pressed.down = pressed,
+                    KeyCode::ArrowLeft if pressed => self.load_prev_model = true,
+                    KeyCode::ArrowRight if pressed => self.load_next_model = true,
+                    _ => {}
+                }
+                match logical_key {
+                    Key::Character(key) if pressed && key == "r"
+                        => self.toggle_rotate = !self.toggle_rotate,
+                    Key::Character(key) if pressed && key == "l"
+                        => self.vulkan.as_mut().unwrap().reset_ubo(),
                     _ => {}
                 }
             }
@@ -129,17 +175,21 @@ impl ApplicationHandler for App {
             } => {
                 self.wheel_delta = v_lines;
             }
-            _ => (),
+            _ => {}
         }
     }
 
-    fn about_to_wait(&mut self, _: &ActiveEventLoop) {
-        use std::io::Write;
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if event_loop.exiting() {
+            return;
+        }
 
         if let Some((start, count)) = self.fps.as_mut() {
             let time = start.elapsed();
             *count += 1;
             if time.as_millis() > 1000 {
+                use std::io::Write;
+
                 eprint!("fps: {}        \r", *count as f32 / time.as_secs_f32());
                 std::io::stdout().flush().unwrap();
                 *start = Instant::now();
@@ -180,17 +230,28 @@ impl ApplicationHandler for App {
         app.model_matrix = Matrix4::from_angle_y(cgmath::Deg(x_ratio * 180.)) * app.model_matrix;
         app.model_matrix = Matrix4::from_angle_x(cgmath::Deg(y_ratio * 180.)) * app.model_matrix;
         if self.toggle_rotate {
-            app.model_matrix = Matrix4::from_angle_y(cgmath::Deg(delta * 90.)) * app.model_matrix;
+            app.model_matrix = Matrix4::from_angle_y(cgmath::Deg(delta * -90.)) * app.model_matrix;
         }
         self.cursor_delta = [0, 0];
 
         app.model_matrix = Matrix4::from_scale(1. + self.wheel_delta * 0.3) * app.model_matrix;
         self.wheel_delta = 0.;
 
+        if self.load_next_model || self.load_prev_model {
+            let offset = self.load_next_model as isize - self.load_prev_model as isize;
+            if let Ok(path) = Self::get_model_path(&mut self.curr_model, offset) {
+                app.load_new_model(&path)
+            };
+            self.load_next_model = false;
+            self.load_prev_model = false;
+        }
+
         app.dirty_swapchain = app.draw_frame();
     }
 
     fn exiting(&mut self, _: &ActiveEventLoop) {
-        self.vulkan.as_ref().unwrap().wait_gpu_idle();
+        if let Some(vulkan) = self.vulkan.as_ref() {
+            vulkan.wait_gpu_idle();
+        }
     }
 }

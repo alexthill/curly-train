@@ -19,6 +19,7 @@ use std::{
     ffi::{CStr, CString},
     io::Cursor,
     mem::{align_of, size_of, size_of_val},
+    path::Path,
 };
 use winit::window::Window;
 
@@ -32,6 +33,7 @@ pub struct VkApp {
     resize_dimensions: Option<[u32; 2]>,
     pub view_matrix: Matrix4<f32>,
     pub model_matrix: Matrix4<f32>,
+    initial_model_matrix: Matrix4<f32>,
     #[allow(unused)]
     model_extent: (Vec3, Vec3),
 
@@ -70,7 +72,7 @@ pub struct VkApp {
 }
 
 impl VkApp {
-    pub fn new(window: &Window, width: u32, height: u32) -> Self {
+    pub fn new<P: AsRef<Path>>(window: &Window, width: u32, height: u32, model_path: P) -> Self {
         log::debug!("Creating application.");
 
         let entry = unsafe { Entry::load().expect("Failed to create entry.") };
@@ -169,7 +171,7 @@ impl VkApp {
 
         let texture = Self::create_texture_image(&vk_context, command_pool, graphics_queue);
 
-        let (vertices, indices, model_extent) = Self::load_model();
+        let (vertices, indices, model_extent) = Self::load_model(model_path);
         let (vertex_buffer, vertex_buffer_memory) = Self::create_buffer_with_data::<u32, _>(
             &vk_context,
             transient_command_pool,
@@ -213,7 +215,11 @@ impl VkApp {
         Self {
             resize_dimensions: None,
             view_matrix: UniformBufferObject::view_matrix(),
-            model_matrix: UniformBufferObject::model_matrix(model_extent.0, model_extent.1),
+            model_matrix: Matrix4::from_scale(1.),
+            initial_model_matrix: UniformBufferObject::model_matrix(
+                model_extent.0,
+                model_extent.1,
+            ),
             model_extent,
             dirty_swapchain: false,
             vk_context,
@@ -1038,7 +1044,7 @@ impl VkApp {
         command_pool: vk::CommandPool,
         copy_queue: vk::Queue,
     ) -> Texture {
-        let cursor = fs::load("images/chalet.jpg");
+        let cursor = fs::load("assets/images/chalet.jpg");
         let image = image::load(cursor, image::ImageFormat::Jpeg)
             .unwrap()
             .flipv();
@@ -1476,11 +1482,11 @@ impl VkApp {
         );
     }
 
-    fn load_model() -> (Vec<Vertex>, Vec<u32>, (Vec3, Vec3)) {
+    fn load_model<P: AsRef<Path>>(path: P) -> (Vec<Vertex>, Vec<u32>, (Vec3, Vec3)) {
         use rand::prelude::*;
 
-        log::debug!("Loading model.");
-        let cursor = fs::load("models/42.obj");
+        log::info!("Loading model {:?}", path.as_ref().as_os_str());
+        let cursor = fs::load(path);
         let obj = Obj::from_reader(cursor).expect("failed to load model");
         let nobj = obj.normalize().expect("failed to normalize model");
 
@@ -1502,7 +1508,7 @@ impl VkApp {
                 coords: vertex.tex_coords,
             }
         }).collect();
-        println!("{min:#?} {max:#?}");
+
         (vertices, nobj.indices.clone(), (min, max))
     }
 
@@ -1753,10 +1759,7 @@ impl VkApp {
 
         let buffers = unsafe { device.allocate_command_buffers(&allocate_info).unwrap() };
 
-        buffers.iter().enumerate().for_each(|(i, buffer)| {
-            let buffer = *buffer;
-            let framebuffer = framebuffers[i];
-
+        for (i, &buffer) in buffers.iter().enumerate() {
             // begin command buffer
             {
                 let command_buffer_begin_info = vk::CommandBufferBeginInfo::default()
@@ -1784,7 +1787,7 @@ impl VkApp {
                 ];
                 let render_pass_begin_info = vk::RenderPassBeginInfo::default()
                     .render_pass(render_pass)
-                    .framebuffer(framebuffer)
+                    .framebuffer(framebuffers[i])
                     .render_area(vk::Rect2D {
                         offset: vk::Offset2D { x: 0, y: 0 },
                         extent: swapchain_properties.extent,
@@ -1834,7 +1837,7 @@ impl VkApp {
 
             // End command buffer
             unsafe { device.end_command_buffer(buffer).unwrap() };
-        });
+        }
 
         buffers
     }
@@ -1946,6 +1949,55 @@ impl VkApp {
             Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => true,
             Err(error) => panic!("Failed to present queue. Cause: {}", error),
         }
+    }
+
+    pub fn load_new_model<P: AsRef<Path>>(&mut self, path: P) {
+        let device = self.vk_context.device();
+        let (vertices, indices, model_extent) = Self::load_model(path);
+        self.initial_model_matrix = UniformBufferObject::model_matrix(
+            model_extent.0,
+            model_extent.1,
+        );
+        self.model_extent = model_extent;
+        self.model_index_count = indices.len();
+
+        unsafe {
+            device.free_memory(self.index_buffer_memory, None);
+            device.destroy_buffer(self.index_buffer, None);
+            device.free_memory(self.vertex_buffer_memory, None);
+            device.destroy_buffer(self.vertex_buffer, None);
+        }
+
+        let (vertex_buffer, vertex_buffer_memory) = Self::create_buffer_with_data::<u32, _>(
+            &self.vk_context,
+            self.transient_command_pool,
+            self.graphics_queue,
+            &vertices,
+        );
+        let (index_buffer, index_buffer_memory) = Self::create_buffer_with_data::<u16, _>(
+            &self.vk_context,
+            self.transient_command_pool,
+            self.graphics_queue,
+            &indices,
+        );
+
+        self.vertex_buffer = vertex_buffer;
+        self.vertex_buffer_memory = vertex_buffer_memory;
+        self.index_buffer = index_buffer;
+        self.index_buffer_memory = index_buffer_memory;
+        self.command_buffers = Self::create_and_register_command_buffers(
+            device,
+            self.command_pool,
+            &self.swapchain_framebuffers,
+            self.render_pass,
+            self.swapchain_properties,
+            vertex_buffer,
+            index_buffer,
+            self.model_index_count,
+            self.pipeline_layout,
+            &self.descriptor_sets,
+            self.pipeline,
+        );
     }
 
     /// Recreates the swapchain.
@@ -2063,7 +2115,7 @@ impl VkApp {
         let aspect = self.swapchain_properties.extent.width as f32
             / self.swapchain_properties.extent.height as f32;
         let ubo = UniformBufferObject {
-            model: self.model_matrix,
+            model: self.model_matrix * self.initial_model_matrix,
             view: self.view_matrix,
             proj: math::perspective(Deg(45.0), aspect, 0.1, 10.0),
         };
@@ -2085,6 +2137,15 @@ impl VkApp {
     pub fn get_extent(&self) -> vk::Extent2D {
         self.swapchain_properties.extent
     }
+
+    pub fn reset_ubo(&mut self) {
+        self.view_matrix = UniformBufferObject::view_matrix();
+        self.model_matrix = Matrix4::from_scale(1.);
+        self.initial_model_matrix = UniformBufferObject::model_matrix(
+            self.model_extent.0,
+            self.model_extent.1,
+        );
+    }
 }
 
 impl Drop for VkApp {
@@ -2097,16 +2158,12 @@ impl Drop for VkApp {
         unsafe {
             device.destroy_descriptor_pool(self.descriptor_pool, None);
             device.destroy_descriptor_set_layout(self.descriptor_set_layout, None);
-            self.uniform_buffer_memories
-                .iter()
-                .for_each(|m| device.free_memory(*m, None));
-            self.uniform_buffers
-                .iter()
-                .for_each(|b| device.destroy_buffer(*b, None));
+            self.uniform_buffer_memories.iter().for_each(|m| device.free_memory(*m, None));
+            self.uniform_buffers.iter().for_each(|b| device.destroy_buffer(*b, None));
             device.free_memory(self.index_buffer_memory, None);
             device.destroy_buffer(self.index_buffer, None);
-            device.destroy_buffer(self.vertex_buffer, None);
             device.free_memory(self.vertex_buffer_memory, None);
+            device.destroy_buffer(self.vertex_buffer, None);
             self.texture.destroy(device);
             device.destroy_command_pool(self.transient_command_pool, None);
             device.destroy_command_pool(self.command_pool, None);
