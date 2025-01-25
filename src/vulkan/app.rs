@@ -93,7 +93,8 @@ impl VkApp {
         let debug_report_callback = setup_debug_messenger(&entry, &instance);
 
         let (physical_device, queue_families_indices) =
-            Self::pick_physical_device(&instance, &surface, surface_khr);
+            Self::pick_physical_device(&instance, &surface, surface_khr)
+            .expect("No suitable physical device.");
 
         let (device, graphics_queue, present_queue) =
             Self::create_logical_device_with_graphics_queue(
@@ -309,69 +310,61 @@ impl VkApp {
     ///
     /// # Returns
     ///
-    /// A tuple containing the physical device and the queue families indices.
+    /// None if no suitable device is found.
+    /// Else Some tuple containing the physical device and the queue families indices.
     fn pick_physical_device(
         instance: &Instance,
         surface: &surface::Instance,
         surface_khr: vk::SurfaceKHR,
-    ) -> (vk::PhysicalDevice, QueueFamiliesIndices) {
+    ) -> Option<(vk::PhysicalDevice, QueueFamiliesIndices)> {
         let devices = unsafe { instance.enumerate_physical_devices().unwrap() };
-        let device = devices
+        let (device, queue_families_indices) = devices
             .into_iter()
-            .find(|&device| {
-                let (graphics, present) =
-                    Self::find_queue_families(instance, surface, surface_khr, device);
-                let extention_support = Self::check_device_extension_support(instance, device);
-                let is_swapchain_adequate = {
-                    let details = SwapchainSupportDetails::new(device, surface, surface_khr);
-                    !details.formats.is_empty() && !details.present_modes.is_empty()
-                };
-                let features = unsafe { instance.get_physical_device_features(device) };
+            .filter_map(|device| {
+                if !Self::check_device_extension_support(instance, device) {
+                    return None;
+                }
 
-                graphics.is_some()
-                    && present.is_some()
-                    && extention_support
-                    && is_swapchain_adequate
-                    && features.sampler_anisotropy == vk::TRUE
+                let details = SwapchainSupportDetails::new(device, surface, surface_khr);
+                if details.formats.is_empty() || details.present_modes.is_empty() {
+                    return None;
+                }
+
+                let features = unsafe { instance.get_physical_device_features(device) };
+                if features.sampler_anisotropy != vk::TRUE {
+                    return None;
+                }
+
+                let Some(queue_families_indices) = Self::find_queue_families(instance, surface, surface_khr, device) else {
+                    return None;
+                };
+                Some((device, queue_families_indices))
             })
-            .expect("No suitable physical device.");
+            .next()?;
 
         let props = unsafe { instance.get_physical_device_properties(device) };
         log::debug!("Selected physical device: {:?}", unsafe {
             CStr::from_ptr(props.device_name.as_ptr())
         });
 
-        let (graphics, present) = Self::find_queue_families(instance, surface, surface_khr, device);
-        let queue_families_indices = QueueFamiliesIndices {
-            graphics_index: graphics.unwrap(),
-            present_index: present.unwrap(),
-        };
-
-        (device, queue_families_indices)
+        Some((device, queue_families_indices))
     }
 
     fn check_device_extension_support(instance: &Instance, device: vk::PhysicalDevice) -> bool {
-        let required_extentions = Self::get_required_device_extensions();
         let extension_props = unsafe {
             instance.enumerate_device_extension_properties(device).unwrap()
         };
 
-        for required in required_extentions.iter() {
-            let found = extension_props.iter().any(|ext| {
+        Self::get_required_device_extensions().into_iter().all(|required_ext| {
+            extension_props.iter().any(|ext| {
                 let name = unsafe { CStr::from_ptr(ext.extension_name.as_ptr()) };
-                required == &name
-            });
-
-            if !found {
-                return false;
-            }
-        }
-
-        true
+                required_ext == name
+            })
+        })
     }
 
-    #[cfg(not(any(target_os = "macos", target_os = "ios")))]
     fn get_required_device_extensions() -> [&'static CStr; 1] {
+        #[cfg(not(any(target_os = "macos", target_os = "ios")))]
         [khr_swapchain::NAME]
     }
 
@@ -382,41 +375,43 @@ impl VkApp {
 
     /// Find a queue family with at least one graphics queue and one with
     /// at least one presentation queue from `device`.
-    ///
-    /// #Returns
-    ///
-    /// Return a tuple (Option<graphics_family_index>, Option<present_family_index>).
     fn find_queue_families(
         instance: &Instance,
         surface: &surface::Instance,
         surface_khr: vk::SurfaceKHR,
         device: vk::PhysicalDevice,
-    ) -> (Option<u32>, Option<u32>) {
+    ) -> Option<QueueFamiliesIndices> {
         let mut graphics = None;
         let mut present = None;
 
         let props = unsafe { instance.get_physical_device_queue_family_properties(device) };
-        for (index, family) in props.iter().filter(|f| f.queue_count > 0).enumerate() {
+        for (index, family) in props.iter().enumerate() {
+            if family.queue_count == 0 {
+                // this should not be possible according to the vulkan spec:
+                // "Each queue family must support at least one queue."
+                continue;
+            }
+
             let index = index as u32;
             if family.queue_flags.contains(vk::QueueFlags::GRAPHICS) && graphics.is_none() {
                 graphics = Some(index);
             }
-
             let present_support = unsafe {
-                surface
-                    .get_physical_device_surface_support(device, index, surface_khr)
-                    .unwrap()
+                surface.get_physical_device_surface_support(device, index, surface_khr)
             };
-            if present_support && present.is_none() {
+            if present_support.unwrap_or(false) && present.is_none() {
                 present = Some(index);
             }
 
-            if graphics.is_some() && present.is_some() {
-                break;
+            if let (Some(graphics), Some(present)) = (graphics, present) {
+                return Some(QueueFamiliesIndices {
+                    graphics_index: graphics,
+                    present_index: present,
+                });
             }
         }
 
-        (graphics, present)
+        None
     }
 
     /// Create the logical device to interact with `device`, a graphics queue
