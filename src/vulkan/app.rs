@@ -335,9 +335,8 @@ impl VkApp {
                     return None;
                 }
 
-                let Some(queue_families_indices) = Self::find_queue_families(instance, surface, surface_khr, device) else {
-                    return None;
-                };
+                let queue_families_indices =
+                    Self::find_queue_families(instance, surface, surface_khr, device)?;
                 Some((device, queue_families_indices))
             })
             .next()?;
@@ -1267,7 +1266,6 @@ impl VkApp {
                 })
                 .src_access_mask(src_access_mask)
                 .dst_access_mask(dst_access_mask);
-            let barriers = [barrier];
 
             unsafe {
                 device.cmd_pipeline_barrier(
@@ -1277,7 +1275,7 @@ impl VkApp {
                     vk::DependencyFlags::empty(),
                     &[],
                     &[],
-                    &barriers,
+                    &[barrier],
                 )
             };
         });
@@ -1751,87 +1749,75 @@ impl VkApp {
             .command_pool(pool)
             .level(vk::CommandBufferLevel::PRIMARY)
             .command_buffer_count(framebuffers.len() as _);
-
         let buffers = unsafe { device.allocate_command_buffers(&allocate_info).unwrap() };
 
         for (i, &buffer) in buffers.iter().enumerate() {
             // begin command buffer
-            {
-                let command_buffer_begin_info = vk::CommandBufferBeginInfo::default()
-                    .flags(vk::CommandBufferUsageFlags::SIMULTANEOUS_USE);
-                // .inheritance_info() null since it's a primary command buffer
-                unsafe {
-                    device.begin_command_buffer(buffer, &command_buffer_begin_info).unwrap()
-                };
-            }
+            let command_buffer_begin_info = vk::CommandBufferBeginInfo::default()
+                .flags(vk::CommandBufferUsageFlags::SIMULTANEOUS_USE);
+            unsafe {
+                device.begin_command_buffer(buffer, &command_buffer_begin_info).unwrap()
+            };
 
             // begin render pass
-            {
-                let clear_values = [
-                    vk::ClearValue {
-                        color: vk::ClearColorValue {
-                            float32: [0.0, 0.0, 0.0, 1.0],
-                        },
+            let clear_values = [
+                vk::ClearValue {
+                    color: vk::ClearColorValue {
+                        float32: [0.0, 0.0, 0.0, 1.0],
                     },
-                    vk::ClearValue {
-                        depth_stencil: vk::ClearDepthStencilValue {
-                            depth: 1.0,
-                            stencil: 0,
-                        },
+                },
+                vk::ClearValue {
+                    depth_stencil: vk::ClearDepthStencilValue {
+                        depth: 1.0,
+                        stencil: 0,
                     },
-                ];
-                let render_pass_begin_info = vk::RenderPassBeginInfo::default()
-                    .render_pass(render_pass)
-                    .framebuffer(framebuffers[i])
-                    .render_area(vk::Rect2D {
-                        offset: vk::Offset2D { x: 0, y: 0 },
-                        extent: swapchain_properties.extent,
-                    })
-                    .clear_values(&clear_values);
+                },
+            ];
+            let render_pass_begin_info = vk::RenderPassBeginInfo::default()
+                .render_pass(render_pass)
+                .framebuffer(framebuffers[i])
+                .render_area(vk::Rect2D {
+                    offset: vk::Offset2D { x: 0, y: 0 },
+                    extent: swapchain_properties.extent,
+                })
+                .clear_values(&clear_values);
+            unsafe {
+                device.cmd_begin_render_pass(
+                    buffer,
+                    &render_pass_begin_info,
+                    vk::SubpassContents::INLINE,
+                )
+            };
 
-                unsafe {
-                    device.cmd_begin_render_pass(
-                        buffer,
-                        &render_pass_begin_info,
-                        vk::SubpassContents::INLINE,
-                    )
-                };
-            }
-
-            // Bind pipeline
             unsafe {
                 device.cmd_bind_pipeline(buffer, vk::PipelineBindPoint::GRAPHICS, graphics_pipeline)
             };
 
-            // Bind vertex buffer
-            let vertex_buffers = [vertex_buffer];
-            let offsets = [0];
-            unsafe { device.cmd_bind_vertex_buffers(buffer, 0, &vertex_buffers, &offsets) };
-
-            // Bind index buffer
-            unsafe { device.cmd_bind_index_buffer(buffer, index_buffer, 0, vk::IndexType::UINT32) };
-
-            // Bind descriptor set
+            // bind vertex and index buffer
             unsafe {
-                let null = [];
+                device.cmd_bind_vertex_buffers(buffer, 0, &[vertex_buffer], &[0]);
+                device.cmd_bind_index_buffer(buffer, index_buffer, 0, vk::IndexType::UINT32);
+            };
+
+            // bind descriptor set
+            unsafe {
                 device.cmd_bind_descriptor_sets(
                     buffer,
                     vk::PipelineBindPoint::GRAPHICS,
                     pipeline_layout,
                     0,
                     &descriptor_sets[i..=i],
-                    &null,
+                    &[],
                 )
             };
 
-            // Draw
             unsafe { device.cmd_draw_indexed(buffer, index_count as _, 1, 0, 0, 0) };
 
-            // End render pass
-            unsafe { device.cmd_end_render_pass(buffer) };
-
-            // End command buffer
-            unsafe { device.end_command_buffer(buffer).unwrap() };
+            // end render pass and command buffer
+            unsafe {
+                device.cmd_end_render_pass(buffer);
+                device.end_command_buffer(buffer).unwrap();
+            };
         }
 
         buffers
@@ -1897,13 +1883,15 @@ impl VkApp {
             )
         };
         let image_index = match result {
-            Ok((image_index, _)) => image_index,
+            // ignore suboptimal swap chain here because we already aquired an image
+            Ok((image_index, _suboptimal)) => image_index,
             Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
                 return true;
             }
             Err(error) => panic!("Error while acquiring next image. Cause: {}", error),
         };
 
+        // it is important to only reset the fence when we know that we are going to do work
         unsafe { self.vk_context.device().reset_fences(&wait_fences).unwrap() };
 
         self.update_uniform_buffers(image_index);
@@ -1923,9 +1911,7 @@ impl VkApp {
                 .signal_semaphores(&signal_semaphores);
             let submit_infos = [submit_info];
             unsafe {
-                device
-                    .queue_submit(self.graphics_queue, &submit_infos, in_flight_fence)
-                    .unwrap()
+                device.queue_submit(self.graphics_queue, &submit_infos, in_flight_fence).unwrap()
             };
         }
 
@@ -1956,6 +1942,8 @@ impl VkApp {
         self.model_extent = model_extent;
         self.model_index_count = indices.len();
 
+        self.wait_gpu_idle();
+
         unsafe {
             device.free_memory(self.index_buffer_memory, None);
             device.destroy_buffer(self.index_buffer, None);
@@ -1980,6 +1968,11 @@ impl VkApp {
         self.vertex_buffer_memory = vertex_buffer_memory;
         self.index_buffer = index_buffer;
         self.index_buffer_memory = index_buffer_memory;
+
+        unsafe {
+            device.free_command_buffers(self.command_pool, &self.command_buffers);
+        }
+
         self.command_buffers = Self::create_and_register_command_buffers(
             device,
             self.command_pool,
@@ -2092,16 +2085,16 @@ impl VkApp {
         unsafe {
             self.depth_texture.destroy(device);
             self.color_texture.destroy(device);
-            self.swapchain_framebuffers
-                .iter()
-                .for_each(|f| device.destroy_framebuffer(*f, None));
+            for framebuffer in self.swapchain_framebuffers.iter() {
+                device.destroy_framebuffer(*framebuffer, None);
+            }
             device.free_command_buffers(self.command_pool, &self.command_buffers);
             device.destroy_pipeline(self.pipeline, None);
             device.destroy_pipeline_layout(self.pipeline_layout, None);
             device.destroy_render_pass(self.render_pass, None);
-            self.swapchain_image_views
-                .iter()
-                .for_each(|v| device.destroy_image_view(*v, None));
+            for image_view in self.swapchain_image_views.iter() {
+                device.destroy_image_view(*image_view, None);
+            }
             self.swapchain.destroy_swapchain(self.swapchain_khr, None);
         }
     }
