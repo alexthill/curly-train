@@ -1,5 +1,5 @@
 use crate::fs;
-use crate::math;
+use crate::math::{self, Deg, Matrix4, Vector3};
 use crate::obj::Obj;
 use super::context::VkContext;
 use super::debug::*;
@@ -12,7 +12,6 @@ use ash::{
     khr::{surface, swapchain as khr_swapchain},
     vk, Device, Entry, Instance,
 };
-use cgmath::{Deg, Matrix4, Vector3};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use std::{
     error::Error,
@@ -23,19 +22,17 @@ use std::{
 };
 use winit::window::Window;
 
-type Vec3 = Vector3<f32>;
-
 const MAX_FRAMES_IN_FLIGHT: u32 = 2;
 
 pub struct VkApp {
     pub dirty_swapchain: bool,
 
     resize_dimensions: Option<[u32; 2]>,
-    pub view_matrix: Matrix4<f32>,
-    pub model_matrix: Matrix4<f32>,
-    initial_model_matrix: Matrix4<f32>,
+    pub view_matrix: Matrix4,
+    pub model_matrix: Matrix4,
+    initial_model_matrix: Matrix4,
     #[allow(unused)]
-    model_extent: (Vec3, Vec3),
+    model_extent: (Vector3, Vector3),
 
     vk_context: VkContext,
     queue_families_indices: QueueFamiliesIndices,
@@ -216,7 +213,7 @@ impl VkApp {
         Self {
             resize_dimensions: None,
             view_matrix: UniformBufferObject::view_matrix(),
-            model_matrix: Matrix4::from_scale(1.),
+            model_matrix: Matrix4::unit(),
             initial_model_matrix: UniformBufferObject::model_matrix(
                 model_extent.0,
                 model_extent.1,
@@ -1475,7 +1472,7 @@ impl VkApp {
         );
     }
 
-    fn load_model<P: AsRef<Path>>(path: P) -> (Vec<Vertex>, Vec<u32>, (Vec3, Vec3)) {
+    fn load_model<P: AsRef<Path>>(path: P) -> (Vec<Vertex>, Vec<u32>, (Vector3, Vector3)) {
         use rand::prelude::*;
 
         log::info!("Loading model {:?}", path.as_ref().as_os_str());
@@ -1484,8 +1481,8 @@ impl VkApp {
         let nobj = obj.normalize().expect("failed to normalize model");
 
         let mut rng = rand::rng();
-        let mut min = Vec3::new(f32::MAX, f32::MAX, f32::MAX);
-        let mut max = Vec3::new(f32::MIN, f32::MIN, f32::MIN);
+        let mut min = Vector3::new(f32::MAX);
+        let mut max = Vector3::new(f32::MIN);
         let vertices = nobj.vertices.iter().map(|vertex| {
             for (i, &coord) in vertex.pos_coords.iter().enumerate() {
                 min[i] = min[i].min(coord);
@@ -2128,7 +2125,7 @@ impl VkApp {
 
     pub fn reset_ubo(&mut self) {
         self.view_matrix = UniformBufferObject::view_matrix();
-        self.model_matrix = Matrix4::from_scale(1.);
+        self.model_matrix = Matrix4::unit();
         self.initial_model_matrix = UniformBufferObject::model_matrix(
             self.model_extent.0,
             self.model_extent.1,

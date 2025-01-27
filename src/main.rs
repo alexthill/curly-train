@@ -1,6 +1,6 @@
+use scop_lib::math::{Deg, Matrix4, Vector3};
 use scop_lib::vulkan::VkApp;
 
-use cgmath::{Matrix4, Vector3};
 use winit::{
     application::ApplicationHandler,
     dpi::PhysicalSize,
@@ -215,22 +215,20 @@ impl ApplicationHandler for App {
         let delta = elapsed.as_secs_f32();
         self.last_frame = Some(Instant::now());
 
-        let mut translation = Vector3::new(0., 0., 0.);
-        if self.pressed.forward { translation.z += 1. * delta };
-        if self.pressed.backward { translation.z -= 1. * delta };
-        if self.pressed.left { translation.x += 1. * delta };
-        if self.pressed.right { translation.x -= 1. * delta };
-        if self.pressed.up { translation.y += 1. * delta };
-        if self.pressed.down { translation.y -= 1. * delta };
+        let translation = Vector3::from([
+            (self.pressed.left    as i8 - self.pressed.right    as i8) as f32 * delta,
+            (self.pressed.up      as i8 - self.pressed.down     as i8) as f32 * delta,
+            (self.pressed.forward as i8 - self.pressed.backward as i8) as f32 * delta,
+        ]);
         app.view_matrix = Matrix4::from_translation(translation) * app.view_matrix;
 
         let extent = app.get_extent();
         let x_ratio = self.cursor_delta[0] as f32 / extent.width as f32;
         let y_ratio = self.cursor_delta[1] as f32 / extent.height as f32;
-        app.model_matrix = Matrix4::from_angle_y(cgmath::Deg(x_ratio * 180.)) * app.model_matrix;
-        app.model_matrix = Matrix4::from_angle_x(cgmath::Deg(y_ratio * 180.)) * app.model_matrix;
+        app.model_matrix = Matrix4::from_angle_y(Deg(x_ratio * 180.)) * app.model_matrix;
+        app.model_matrix = Matrix4::from_angle_x(Deg(y_ratio * 180.)) * app.model_matrix;
         if self.toggle_rotate {
-            app.model_matrix = Matrix4::from_angle_y(cgmath::Deg(delta * -90.)) * app.model_matrix;
+            app.model_matrix = Matrix4::from_angle_y(Deg(delta * -90.)) * app.model_matrix;
         }
         self.cursor_delta = [0, 0];
 

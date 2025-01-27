@@ -1,45 +1,30 @@
-use cgmath::prelude::*;
-use cgmath::{BaseFloat, Matrix4, Rad};
+pub mod angle;
+pub mod matrix;
+pub mod vector;
+
+pub use angle::{Rad, Deg};
+
+pub type Vector2 = vector::Vector<f32, 2>;
+pub type Vector3 = vector::Vector<f32, 3>;
+pub type Vector4 = vector::Vector<f32, 4>;
+
+pub type Matrix2 = matrix::Matrix<f32, 2>;
+pub type Matrix3 = matrix::Matrix<f32, 3>;
+pub type Matrix4 = matrix::Matrix<f32, 4>;
 
 /// Perspective matrix that is suitable for Vulkan.
 ///
-/// It inverts the projected y-axis. And set the depth range to 0..1
+/// It inverts the projected y-axis and sets the depth range to 0..1
 /// instead of -1..1. Mind the vertex winding order though.
-pub fn perspective<S, F>(fovy: F, aspect: S, near: S, far: S) -> Matrix4<S>
+pub fn perspective<F>(fovy: F, aspect: f32, near: f32, far: f32) -> Matrix4
 where
-    S: BaseFloat,
-    F: Into<Rad<S>>,
+    F: Into<angle::Rad<f32>>,
 {
-    let two = S::one() + S::one();
-    let f = Rad::cot(fovy.into() / two);
-
-    let c0r0 = f / aspect;
-    let c0r1 = S::zero();
-    let c0r2 = S::zero();
-    let c0r3 = S::zero();
-
-    let c1r0 = S::zero();
-    let c1r1 = -f;
-    let c1r2 = S::zero();
-    let c1r3 = S::zero();
-
-    let c2r0 = S::zero();
-    let c2r1 = S::zero();
-    let c2r2 = -far / (far - near);
-    let c2r3 = -S::one();
-
-    let c3r0 = S::zero();
-    let c3r1 = S::zero();
-    let c3r2 = -(far * near) / (far - near);
-    let c3r3 = S::zero();
-
-    #[rustfmt::skip]
-    let res = Matrix4::new(
-        c0r0, c0r1, c0r2, c0r3,
-        c1r0, c1r1, c1r2, c1r3,
-        c2r0, c2r1, c2r2, c2r3,
-        c3r0, c3r1, c3r2, c3r3,
-    );
-
-    res
+    let f = 1. / (fovy.into().0 / 2.).tan();
+    Matrix4::from([
+        Vector4::from([f / aspect, 0., 0., 0.]),
+        Vector4::from([0., -f, 0., 0.]),
+        Vector4::from([0., 0., -far / (far - near), -1.]),
+        Vector4::from([0., 0., -(far * near) / (far - near), 0.]),
+    ])
 }
