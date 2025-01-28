@@ -51,13 +51,15 @@ impl Obj {
                 Self::parse_part::<_, 2>(1, parts.next())?,
             ]),
             // not implemented
-            b"mtllib" | b"o" | b"s" | b"usemtl" => return Ok(()),
+            b"g" | b"o" | b"s" | b"vn" | b"mtllib" | b"usemtl" => return Ok(()),
             other => {
                 return Err(ObjError::InvalidIden(String::from_utf8_lossy(other).into_owned()));
             }
         };
-        if parts.next().is_some() {
-            return Err(ObjError::TooManyNums);
+        if let Some(next) = parts.next() {
+            if next[0] != b'#' {
+                return Err(ObjError::TooManyNums);
+            }
         }
         Ok(())
     }
@@ -77,6 +79,7 @@ impl Obj {
                     let pos_coords = *obj.vertices.get(indices.vertex.get() as usize - 1)
                         .ok_or(ObjError::InvalidVertexIndex(indices.vertex.into()))?;
                     let tex_coords = if let Some(tex_coords_idx) = indices.texture {
+                        nobj.has_tex_coords = true;
                         *obj.tex_coords.get(tex_coords_idx.get() as usize - 1)
                             .ok_or(ObjError::InvalidTextureIndex(tex_coords_idx.into()))?
                     } else {
@@ -120,6 +123,7 @@ impl Obj {
 pub struct NormalizedObj {
     pub indices: Vec<u32>,
     pub vertices: Vec<Vertex>,
+    pub has_tex_coords: bool,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
@@ -132,6 +136,7 @@ pub struct Vertex {
 pub struct Indices {
     pub vertex: NonZeroU32,
     pub texture: Option<NonZeroU32>,
+    pub normal: Option<NonZeroU32>,
 }
 
 impl str::FromStr for Indices {
@@ -143,13 +148,18 @@ impl str::FromStr for Indices {
             return Err(ObjError::NotEnoughNums(0, 1));
         };
         let vertex = part.parse().map_err(|_| ObjError::InvalidNum(part.to_owned()))?;
-        let texture = if let Some(part) = parts.next() {
+        let texture = match parts.next() {
+            Some(part) if !part.is_empty() =>
+                Some(part.parse().map_err(|_| ObjError::InvalidNum(part.to_owned()))?),
+            _ => None,
+        };
+        let normal = if let Some(part) = parts.next() {
             Some(part.parse().map_err(|_| ObjError::InvalidNum(part.to_owned()))?)
         } else {
             None
         };
 
-        Ok(Self { vertex, texture })
+        Ok(Self { vertex, texture, normal })
     }
 }
 
