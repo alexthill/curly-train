@@ -1,4 +1,4 @@
-use crate::math::{Matrix4, Vector3};
+use crate::math::{Deg, Matrix4, Vector3};
 
 use ash::vk;
 use std::mem::offset_of;
@@ -53,6 +53,7 @@ pub struct UniformBufferObject {
     pub model: Matrix4,
     pub view: Matrix4,
     pub proj: Matrix4,
+    pub texture_weight: f32,
 }
 
 impl UniformBufferObject {
@@ -77,6 +78,6 @@ impl UniformBufferObject {
         let max_size = model_sizes.x().max(model_sizes.y()).max(model_sizes.z());
         let scale = Matrix4::from_scale(1. / max_size);
         let translate = Matrix4::from_translation(-extent_min - model_sizes / 2.);
-        scale * translate
+        Matrix4::from_angle_y(Deg(-90.)) * scale * translate
     }
 }

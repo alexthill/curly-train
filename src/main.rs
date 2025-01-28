@@ -55,6 +55,7 @@ struct App {
     cursor_position: Option<[i32; 2]>,
     cursor_delta: [i32; 2],
     wheel_delta: f32,
+    tex_weight_change: f32,
 
     curr_model: usize,
 }
@@ -153,6 +154,13 @@ impl ApplicationHandler for App {
                         => self.toggle_rotate = !self.toggle_rotate,
                     Key::Character(key) if pressed && key == "l"
                         => self.vulkan.as_mut().unwrap().reset_ubo(),
+                    Key::Character(key) if pressed && key == "t" => {
+                        self.tex_weight_change = if self.tex_weight_change == 0. {
+                            0.5 // change will take 2 secs from 0 to 1
+                        } else {
+                            -self.tex_weight_change
+                        };
+                    }
                     _ => {}
                 }
             }
@@ -221,7 +229,7 @@ impl ApplicationHandler for App {
 
         let translation = Vector3::from([
             (self.pressed.left    as i8 - self.pressed.right    as i8) as f32 * delta,
-            (self.pressed.up      as i8 - self.pressed.down     as i8) as f32 * delta,
+            (self.pressed.down    as i8 - self.pressed.up       as i8) as f32 * delta,
             (self.pressed.forward as i8 - self.pressed.backward as i8) as f32 * delta,
         ]);
         app.view_matrix = Matrix4::from_translation(translation) * app.view_matrix;
@@ -247,6 +255,8 @@ impl ApplicationHandler for App {
             self.load_next_model = false;
             self.load_prev_model = false;
         }
+
+        app.texture_weight = (app.texture_weight + self.tex_weight_change * delta).min(1.).max(0.);
 
         app.dirty_swapchain = app.draw_frame();
     }

@@ -30,8 +30,8 @@ pub struct VkApp {
     resize_dimensions: Option<[u32; 2]>,
     pub view_matrix: Matrix4,
     pub model_matrix: Matrix4,
+    pub texture_weight: f32,
     initial_model_matrix: Matrix4,
-    #[allow(unused)]
     model_extent: (Vector3, Vector3),
 
     vk_context: VkContext,
@@ -226,6 +226,7 @@ impl VkApp {
                 model_extent.0,
                 model_extent.1,
             ),
+            texture_weight: 0.,
             model_extent,
             dirty_swapchain: false,
             vk_context,
@@ -826,7 +827,7 @@ impl VkApp {
             .rasterizer_discard_enable(false)
             .polygon_mode(vk::PolygonMode::FILL)
             .line_width(1.0)
-            .cull_mode(vk::CullModeFlags::BACK)
+            .cull_mode(vk::CullModeFlags::NONE)
             .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
             .depth_bias_enable(false)
             .depth_bias_constant_factor(0.0)
@@ -1019,7 +1020,7 @@ impl VkApp {
     }
 
     fn find_depth_format(vk_context: &VkContext) -> vk::Format {
-        let candidates = vec![
+        let candidates = [
             vk::Format::D32_SFLOAT,
             vk::Format::D32_SFLOAT_S8_UINT,
             vk::Format::D24_UNORM_S8_UINT,
@@ -1480,14 +1481,11 @@ impl VkApp {
     }
 
     fn load_model<P: AsRef<Path>>(path: P) -> (Vec<Vertex>, Vec<u32>, (Vector3, Vector3)) {
-        use rand::prelude::*;
-
         log::info!("Loading model {:?}", path.as_ref().as_os_str());
         let cursor = fs::load(path);
         let obj = Obj::from_reader(cursor).expect("failed to load model");
         let nobj = obj.normalize().expect("failed to normalize model");
 
-        let mut rng = rand::rng();
         let mut min = Vector3::new(f32::MAX);
         let mut max = Vector3::new(f32::MIN);
         let vertices = nobj.vertices.iter().map(|vertex| {
@@ -1495,14 +1493,15 @@ impl VkApp {
                 min[i] = min[i].min(coord);
                 max[i] = max[i].max(coord);
             }
-            let r = rng.random_range(0. .. 1.);
-            let g = rng.random_range(0. .. 1.);
-            let b = rng.random_range(0. .. 1.);
+            let tex_coords = if nobj.has_tex_coords {
+                vertex.tex_coords
+            } else {
+                [vertex.pos_coords[2], vertex.pos_coords[1]]
+            };
             Vertex {
                 pos: vertex.pos_coords,
-                color: [r, g, b],
-                //color: [1.0, 1.0, 1.0],
-                coords: vertex.tex_coords,
+                color: [1.0, 1.0, 1.0],
+                coords: tex_coords,
             }
         }).collect();
 
@@ -2111,6 +2110,7 @@ impl VkApp {
             model: self.model_matrix * self.initial_model_matrix,
             view: self.view_matrix,
             proj: math::perspective(Deg(45.0), aspect, 0.1, 10.0),
+            texture_weight: self.texture_weight,
         };
         let ubos = [ubo];
 
