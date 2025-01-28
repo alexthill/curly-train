@@ -12,6 +12,7 @@ use ash::{
     khr::{surface, swapchain as khr_swapchain},
     vk, Device, Entry, Instance,
 };
+use image::ImageReader;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use std::{
     error::Error,
@@ -70,11 +71,12 @@ pub struct VkApp {
 }
 
 impl VkApp {
-    pub fn new<P: AsRef<Path>>(
+    pub fn new<P1: AsRef<Path>, P2: AsRef<Path>>(
         window: &Window,
         width: u32,
         height: u32,
-        model_path: P,
+        model_path: P1,
+        image_path: P2,
         shader_spv: ShaderSpv,
     ) -> Self {
         log::debug!("Creating application.");
@@ -175,7 +177,12 @@ impl VkApp {
             properties,
         );
 
-        let texture = Self::create_texture_image(&vk_context, command_pool, graphics_queue);
+        let texture = Self::create_texture_image(
+            &vk_context,
+            command_pool,
+            graphics_queue,
+            image_path,
+        );
 
         let (vertices, indices, model_extent) = Self::load_model(model_path);
         let (vertex_buffer, vertex_buffer_memory) = Self::create_buffer_with_data::<u32, _>(
@@ -1038,15 +1045,13 @@ impl VkApp {
         format == vk::Format::D32_SFLOAT_S8_UINT || format == vk::Format::D24_UNORM_S8_UINT
     }
 
-    fn create_texture_image(
+    fn create_texture_image<P: AsRef<Path>>(
         vk_context: &VkContext,
         command_pool: vk::CommandPool,
         copy_queue: vk::Queue,
+        path: P,
     ) -> Texture {
-        let cursor = fs::load("assets/images/chalet.jpg");
-        let image = image::load(cursor, image::ImageFormat::Jpeg)
-            .unwrap()
-            .flipv();
+        let image = ImageReader::open(path).unwrap().decode().unwrap().flipv();
         let image_as_rgb = image.to_rgba8();
         let width = image_as_rgb.width();
         let height = image_as_rgb.height();
@@ -1933,6 +1938,52 @@ impl VkApp {
             Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => true,
             Err(error) => panic!("Failed to present queue. Cause: {}", error),
         }
+    }
+
+    pub fn load_new_texture<P: AsRef<Path>>(&mut self, path: P) {
+        log::info!("Loading image {:?}", path.as_ref().as_os_str());
+        self.wait_gpu_idle();
+
+        let texture = Self::create_texture_image(
+            &self.vk_context,
+            self.command_pool,
+            self.graphics_queue,
+            path,
+        );
+        let device = self.vk_context.device();
+
+        for set in self.descriptor_sets.iter() {
+            let image_info = vk::DescriptorImageInfo::default()
+                .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                .image_view(texture.view)
+                .sampler(texture.sampler.unwrap());
+            let image_infos = [image_info];
+            let sampler_descriptor_write = vk::WriteDescriptorSet::default()
+                .dst_set(*set)
+                .dst_binding(1)
+                .dst_array_element(0)
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .image_info(&image_infos);
+            unsafe { device.update_descriptor_sets(&[sampler_descriptor_write], &[]) }
+        }
+
+        unsafe {
+            device.free_command_buffers(self.command_pool, &self.command_buffers);
+        }
+
+        self.command_buffers = Self::create_and_register_command_buffers(
+            device,
+            self.command_pool,
+            &self.swapchain_framebuffers,
+            self.render_pass,
+            self.swapchain_properties,
+            self.vertex_buffer,
+            self.index_buffer,
+            self.model_index_count,
+            self.pipeline_layout,
+            &self.descriptor_sets,
+            self.pipeline,
+        );
     }
 
     pub fn load_new_model<P: AsRef<Path>>(&mut self, path: P) {

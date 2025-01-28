@@ -1,3 +1,4 @@
+use scop_lib::fs::Carousel;
 use scop_lib::math::{Deg, Matrix4, Vector3};
 use scop_lib::vulkan::{ShaderSpv, VkApp};
 
@@ -9,14 +10,20 @@ use winit::{
     keyboard::{Key, KeyCode, NamedKey, PhysicalKey},
     window::{Window, WindowId},
 };
-use std::fs;
-use std::io;
 use std::path::PathBuf;
 use std::time::Instant;
 
 const WIDTH: u32 = 800;
 const HEIGHT: u32 = 600;
 const TITLE: &str = "scop";
+
+fn check_if_obj(path: &PathBuf) -> bool {
+    path.extension().map(|ext| ext == "obj").unwrap_or_default()
+}
+
+fn check_if_image(path: &PathBuf) -> bool {
+    path.extension().map(|ext| ext == "jpg" || ext == "png").unwrap_or_default()
+}
 
 fn main() {
     env_logger::init();
@@ -26,6 +33,8 @@ fn main() {
 
     let mut app = App::default();
     app.toggle_rotate = true;
+    app.model_carousel.set_dir("assets/models");
+    app.image_carousel.set_dir("assets/images");
     event_loop.run_app(&mut app).unwrap();
 }
 
@@ -51,39 +60,15 @@ struct App {
     toggle_rotate: bool,
     load_prev_model: bool,
     load_next_model: bool,
+    load_next_image: bool,
     is_left_clicked: bool,
     cursor_position: Option<[i32; 2]>,
     cursor_delta: [i32; 2],
     wheel_delta: f32,
     tex_weight_change: f32,
 
-    curr_model: usize,
-}
-
-impl App {
-    fn get_model_path(curr_model: &mut usize, offset_to_curr: isize) -> Result<PathBuf, io::Error> {
-        let mut models = fs::read_dir("assets/models")?
-            .filter_map(|path| {
-                let path = path.ok()?;
-                if !path.file_type().ok()?.is_file() {
-                    return None;
-                }
-                let path = path.path();
-                if path.extension()? != "obj" {
-                    return None;
-                }
-                Some(path)
-            })
-            .collect::<Vec<_>>();
-        if models.is_empty() {
-            return Err(io::Error::new(io::ErrorKind::Other, "no .obj file found"));
-        }
-        models.sort();
-        // take euclidian remainder and not modulus to get a positive value
-        *curr_model = (*curr_model as isize + offset_to_curr)
-            .rem_euclid(models.len() as isize) as usize;
-        Ok(models[*curr_model].clone())
-    }
+    model_carousel: Carousel,
+    image_carousel: Carousel,
 }
 
 impl ApplicationHandler for App {
@@ -96,19 +81,20 @@ impl ApplicationHandler for App {
             )
             .unwrap();
 
-        let model_path = match Self::get_model_path(&mut self.curr_model, 0) {
+        let model_path = match self.model_carousel.get_next(0, check_if_obj) {
             Ok(path) => path,
             Err(err) => {
-                log::error!("Failed to find a model: {err}");
+                log::error!("failed to find a model: {err}");
                 event_loop.exit();
                 return;
             }
         };
+        let image_path = "assets/images/chalet.jpg";
         let shader_spv = ShaderSpv {
             vert: include_bytes!(concat!(env!("OUT_DIR"), "/shader.vert.spv")),
             frag: include_bytes!(concat!(env!("OUT_DIR"), "/shader.frag.spv")),
         };
-        self.vulkan = Some(VkApp::new(&window, WIDTH, HEIGHT, &model_path, shader_spv));
+        self.vulkan = Some(VkApp::new(&window, WIDTH, HEIGHT, &model_path, image_path, shader_spv));
         self.window = Some(window);
     }
 
@@ -150,6 +136,8 @@ impl ApplicationHandler for App {
                     _ => {}
                 }
                 match logical_key {
+                    Key::Character(key) if pressed && key == "i"
+                        => self.load_next_image = true,
                     Key::Character(key) if pressed && key == "r"
                         => self.toggle_rotate = !self.toggle_rotate,
                     Key::Character(key) if pressed && key == "l"
@@ -249,11 +237,19 @@ impl ApplicationHandler for App {
 
         if self.load_next_model || self.load_prev_model {
             let offset = self.load_next_model as isize - self.load_prev_model as isize;
-            if let Ok(path) = Self::get_model_path(&mut self.curr_model, offset) {
-                app.load_new_model(&path)
+            match self.model_carousel.get_next(offset, check_if_obj) {
+                Ok(path) => app.load_new_model(&path),
+                Err(err) => log::warn!("failed to find a model: {err}"),
             };
             self.load_next_model = false;
             self.load_prev_model = false;
+        }
+        if self.load_next_image {
+            match self.image_carousel.get_next(1, check_if_image) {
+                Ok(path) => app.load_new_texture(&path),
+                Err(err) => log::warn!("failed to find an image: {err}"),
+            };
+            self.load_next_image = false;
         }
 
         app.texture_weight = (app.texture_weight + self.tex_weight_change * delta).min(1.).max(0.);
