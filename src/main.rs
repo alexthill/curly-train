@@ -26,6 +26,19 @@ fn check_if_image(path: &PathBuf) -> bool {
 }
 
 fn main() {
+    println!("Usage:");
+    println!("Run with RUST_LOG=debug to see logging output");
+    println!();
+    println!("Left-Click: rotate model with mouse");
+    println!("Mouse-Wheel: zoom image");
+    println!("WASD: move around");
+    println!("Space, Left-Shift: move up and down");
+    println!("<- ->: switch models");
+    println!("I: switch texture image");
+    println!("R: toggle rotate");
+    println!("T: toggle between random colors and texture");
+    println!();
+
     env_logger::init();
 
     let event_loop = EventLoop::new().unwrap();
