@@ -3,7 +3,13 @@ use crate::math::{Matrix4, Vector3};
 use ash::vk;
 use std::mem::offset_of;
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
+pub struct ShaderSpv {
+    pub vert: &'static [u8],
+    pub frag: &'static [u8],
+}
+
+#[derive(Debug, Clone, Copy)]
 #[allow(dead_code)]
 #[repr(C)]
 pub struct Vertex {
@@ -42,6 +48,7 @@ impl Vertex {
 
 #[derive(Debug, Clone, Copy)]
 #[allow(dead_code)]
+#[repr(C)]
 pub struct UniformBufferObject {
     pub model: Matrix4,
     pub view: Matrix4,

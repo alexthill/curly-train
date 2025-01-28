@@ -1,5 +1,5 @@
 use scop_lib::math::{Deg, Matrix4, Vector3};
-use scop_lib::vulkan::VkApp;
+use scop_lib::vulkan::{ShaderSpv, VkApp};
 
 use winit::{
     application::ApplicationHandler,
@@ -25,6 +25,7 @@ fn main() {
     event_loop.set_control_flow(ControlFlow::Poll);
 
     let mut app = App::default();
+    app.toggle_rotate = true;
     event_loop.run_app(&mut app).unwrap();
 }
 
@@ -102,8 +103,11 @@ impl ApplicationHandler for App {
                 return;
             }
         };
-        println!("opening {}", model_path.display());
-        self.vulkan = Some(VkApp::new(&window, WIDTH, HEIGHT, &model_path));
+        let shader_spv = ShaderSpv {
+            vert: include_bytes!(concat!(env!("OUT_DIR"), "/shader.vert.spv")),
+            frag: include_bytes!(concat!(env!("OUT_DIR"), "/shader.frag.spv")),
+        };
+        self.vulkan = Some(VkApp::new(&window, WIDTH, HEIGHT, &model_path, shader_spv));
         self.window = Some(window);
     }
 

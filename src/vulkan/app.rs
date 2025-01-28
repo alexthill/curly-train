@@ -3,7 +3,7 @@ use crate::math::{self, Deg, Matrix4, Vector3};
 use crate::obj::Obj;
 use super::context::VkContext;
 use super::debug::*;
-use super::structs::{Vertex, UniformBufferObject};
+use super::structs::{ShaderSpv, UniformBufferObject, Vertex};
 use super::swapchain::{SwapchainProperties, SwapchainSupportDetails};
 use super::texture::Texture;
 
@@ -66,10 +66,17 @@ pub struct VkApp {
     descriptor_sets: Vec<vk::DescriptorSet>,
     command_buffers: Vec<vk::CommandBuffer>,
     in_flight_frames: InFlightFrames,
+    shader_spv: ShaderSpv,
 }
 
 impl VkApp {
-    pub fn new<P: AsRef<Path>>(window: &Window, width: u32, height: u32, model_path: P) -> Self {
+    pub fn new<P: AsRef<Path>>(
+        window: &Window,
+        width: u32,
+        height: u32,
+        model_path: P,
+        shader_spv: ShaderSpv,
+    ) -> Self {
         log::debug!("Creating application.");
 
         let entry = unsafe { Entry::load().expect("Failed to create entry.") };
@@ -128,6 +135,7 @@ impl VkApp {
             msaa_samples,
             render_pass,
             descriptor_set_layout,
+            shader_spv,
         );
 
         let command_pool = Self::create_command_pool(
@@ -252,6 +260,7 @@ impl VkApp {
             descriptor_sets,
             command_buffers,
             in_flight_frames,
+            shader_spv,
         }
     }
 
@@ -754,6 +763,7 @@ impl VkApp {
         msaa_samples: vk::SampleCountFlags,
         render_pass: vk::RenderPass,
         descriptor_set_layout: vk::DescriptorSetLayout,
+        shader_spv: ShaderSpv,
     ) -> (vk::Pipeline, vk::PipelineLayout) {
         fn create_shader_module(
             device: &Device,
@@ -767,12 +777,9 @@ impl VkApp {
             }
         }
 
-        let vertex_spv = include_bytes!(concat!(env!("OUT_DIR"), "/shader.vert.spv"));
-        let vertex_shader_module = create_shader_module(device, vertex_spv)
+        let vertex_shader_module = create_shader_module(device, shader_spv.vert)
             .expect("failed to load vertex shader spv file");
-
-        let frag_spv = include_bytes!(concat!(env!("OUT_DIR"), "/shader.frag.spv"));
-        let fragment_shader_module = create_shader_module(device, frag_spv)
+        let fragment_shader_module = create_shader_module(device, shader_spv.frag)
             .expect("failed to load fragment shader spv file");
 
         let entry_point_name = CString::new("main").unwrap();
@@ -2020,6 +2027,7 @@ impl VkApp {
             self.msaa_samples,
             render_pass,
             self.descriptor_set_layout,
+            self.shader_spv,
         );
 
         let color_texture = Self::create_color_texture(
