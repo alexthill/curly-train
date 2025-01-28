@@ -37,6 +37,7 @@ fn main() {
     println!("I: switch texture image");
     println!("R: toggle rotate");
     println!("T: toggle between random colors and texture");
+    println!("L: reset camera and object");
     println!();
 
     env_logger::init();
