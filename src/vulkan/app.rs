@@ -1152,6 +1152,7 @@ impl VkApp {
         Texture::new(image, image_memory, image_view, Some(sampler))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn create_image(
         vk_context: &VkContext,
         mem_properties: vk::MemoryPropertyFlags,
@@ -1200,6 +1201,7 @@ impl VkApp {
         (image, memory)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn transition_image_layout(
         device: &Device,
         command_pool: vk::CommandPool,
@@ -1740,6 +1742,7 @@ impl VkApp {
         panic!("Failed to find suitable memory type.")
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn create_and_register_command_buffers(
         device: &Device,
         pool: vk::CommandPool,

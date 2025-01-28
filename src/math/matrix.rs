@@ -171,15 +171,15 @@ where
     }
 }
 
-impl<T, const M: usize, const N: usize> Into<[Vector<T, N>; M]> for Matrix<T, M, N> {
-    fn into(self) -> [Vector<T, N>; M] {
-        self.cols
+impl<T, const M: usize, const N: usize> From<Matrix<T, M, N>> for [Vector<T, N>; M] {
+    fn from(val: Matrix<T, M, N>) -> Self {
+        val.cols
     }
 }
 
-impl<T, const M: usize, const N: usize> Into<[[T; N]; M]> for Matrix<T, M, N> {
-    fn into(self) -> [[T; N]; M] {
-        self.cols.map(|col| col.into())
+impl<T, const M: usize, const N: usize> From<Matrix<T, M, N>> for [[T; N]; M] {
+    fn from(val: Matrix<T, M, N>) -> Self {
+        val.cols.map(|col| col.into())
     }
 }
 

@@ -28,7 +28,7 @@ impl Carousel {
 
     pub fn get_next<F>(&mut self, offset: isize, filter: F) -> Result<PathBuf, io::Error>
     where
-        F: Fn(&PathBuf) -> bool,
+        F: Fn(&Path) -> bool,
     {
         let mut files = std::fs::read_dir(self.dir)?
             .filter_map(|path| {

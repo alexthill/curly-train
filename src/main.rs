@@ -10,18 +10,18 @@ use winit::{
     keyboard::{Key, KeyCode, NamedKey, PhysicalKey},
     window::{Window, WindowId},
 };
-use std::path::PathBuf;
+use std::path::Path;
 use std::time::Instant;
 
 const WIDTH: u32 = 800;
 const HEIGHT: u32 = 600;
 const TITLE: &str = "scop";
 
-fn check_if_obj(path: &PathBuf) -> bool {
+fn check_if_obj(path: &Path) -> bool {
     path.extension().map(|ext| ext == "obj").unwrap_or_default()
 }
 
-fn check_if_image(path: &PathBuf) -> bool {
+fn check_if_image(path: &Path) -> bool {
     path.extension().map(|ext| ext == "jpg" || ext == "png").unwrap_or_default()
 }
 
@@ -44,8 +44,10 @@ fn main() {
     let event_loop = EventLoop::new().unwrap();
     event_loop.set_control_flow(ControlFlow::Poll);
 
-    let mut app = App::default();
-    app.toggle_rotate = true;
+    let mut app = App {
+        toggle_rotate: true,
+        ..Default::default()
+    };
     app.model_carousel.set_dir("assets/models");
     app.image_carousel.set_dir("assets/images");
     event_loop.run_app(&mut app).unwrap();
@@ -102,7 +104,14 @@ impl ApplicationHandler for App {
                 return;
             }
         };
-        let image_path = "assets/images/chalet.jpg";
+        let image_path = match self.image_carousel.get_next(0, check_if_image) {
+            Ok(path) => path,
+            Err(err) => {
+                log::error!("failed to find an image: {err}");
+                event_loop.exit();
+                return;
+            }
+        };
         let shader_spv = ShaderSpv {
             vert: include_bytes!(concat!(env!("OUT_DIR"), "/shader.vert.spv")),
             frag: include_bytes!(concat!(env!("OUT_DIR"), "/shader.frag.spv")),
@@ -265,7 +274,7 @@ impl ApplicationHandler for App {
             self.load_next_image = false;
         }
 
-        app.texture_weight = (app.texture_weight + self.tex_weight_change * delta).min(1.).max(0.);
+        app.texture_weight = (app.texture_weight + self.tex_weight_change * delta).clamp(0., 1.);
 
         app.dirty_swapchain = app.draw_frame();
     }

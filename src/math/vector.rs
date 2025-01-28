@@ -122,9 +122,9 @@ impl<T: Copy + ops::Div<Output = T>, const N: usize> ops::Div<T> for Vector<T, N
     }
 }
 
-impl<T, const N: usize> Into<[T; N]> for Vector<T, N> {
-    fn into(self) -> [T; N] {
-        self.array
+impl<T, const N: usize> From<Vector<T, N>> for [T; N] {
+    fn from(val: Vector<T, N>) -> Self {
+        val.array
     }
 }
 
