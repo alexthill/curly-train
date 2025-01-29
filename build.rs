@@ -24,8 +24,9 @@ fn main() {
 
         if !output.status.success() {
             panic!(
-                "glslangValidator failed with error: {}",
-                String::from_utf8_lossy(&output.stderr)
+                "glslangValidator failed with error: {}\n{}",
+                String::from_utf8_lossy(&output.stderr),
+                String::from_utf8_lossy(&output.stdout),
             );
         }
 

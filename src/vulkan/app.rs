@@ -54,7 +54,7 @@ pub struct VkApp {
     color_texture: Texture,
     depth_format: vk::Format,
     depth_texture: Texture,
-    texture: Texture,
+    textures: [Texture; 2],
     model_index_count: usize,
     vertex_buffer: vk::Buffer,
     vertex_buffer_memory: vk::DeviceMemory,
@@ -166,6 +166,19 @@ impl VkApp {
             graphics_queue,
             image_path,
         ).unwrap();
+        let texture_cubemap = Self::create_cubemap(
+            &vk_context,
+            command_pool,
+            graphics_queue,
+            [
+                "assets/cubemap/front.png",
+                "assets/cubemap/back.png",
+                "assets/cubemap/top.png",
+                "assets/cubemap/bottom.png",
+                "assets/cubemap/right.png",
+                "assets/cubemap/left.png",
+            ],
+        ).unwrap();
 
         let (vertices, indices, model_extent) = Self::load_model(nobj);
         let (vertex_buffer, vertex_buffer_memory) = Self::create_buffer_with_data::<u32, _>(
@@ -189,7 +202,8 @@ impl VkApp {
             descriptor_pool,
             descriptor_set_layout,
             &uniform_buffers,
-            texture,
+            // &[texture, texture_cubemap],
+            &[texture],
         );
 
         let command_buffers = Self::create_and_register_command_buffers(
@@ -238,7 +252,7 @@ impl VkApp {
             color_texture,
             depth_format,
             depth_texture,
-            texture,
+            textures: [texture, texture_cubemap],
             model_index_count: indices.len(),
             vertex_buffer,
             vertex_buffer_memory,
@@ -533,7 +547,7 @@ impl VkApp {
         pool: vk::DescriptorPool,
         layout: vk::DescriptorSetLayout,
         uniform_buffers: &[vk::Buffer],
-        texture: Texture,
+        textures: &[Texture],
     ) -> Vec<vk::DescriptorSet> {
         let layouts = (0..uniform_buffers.len())
             .map(|_| layout)
@@ -550,11 +564,7 @@ impl VkApp {
                 .range(size_of::<UniformBufferObject>() as vk::DeviceSize);
             let buffer_infos = [buffer_info];
 
-            let image_info = vk::DescriptorImageInfo::default()
-                .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-                .image_view(texture.view)
-                .sampler(texture.sampler.unwrap());
-            let image_infos = [image_info];
+            let mut descriptor_writes = Vec::new();
 
             let ubo_descriptor_write = vk::WriteDescriptorSet::default()
                 .dst_set(*set)
@@ -562,14 +572,24 @@ impl VkApp {
                 .dst_array_element(0)
                 .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
                 .buffer_info(&buffer_infos);
-            let sampler_descriptor_write = vk::WriteDescriptorSet::default()
-                .dst_set(*set)
-                .dst_binding(1)
-                .dst_array_element(0)
-                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                .image_info(&image_infos);
+            descriptor_writes.push(ubo_descriptor_write);
 
-            let descriptor_writes = [ubo_descriptor_write, sampler_descriptor_write];
+            let image_infos = textures.iter().map(|texture| {
+                [vk::DescriptorImageInfo::default()
+                    .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                    .image_view(texture.view)
+                    .sampler(texture.sampler.unwrap())]
+            }).collect::<Box<[_]>>();
+
+            for (i, _) in textures.iter().enumerate() {
+                let sampler_descriptor_write = vk::WriteDescriptorSet::default()
+                    .dst_set(*set)
+                    .dst_binding(i as u32 + 1)
+                    .dst_array_element(0)
+                    .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                    .image_info(&image_infos[i]);
+                descriptor_writes.push(sampler_descriptor_write);
+            }
 
             unsafe { device.update_descriptor_sets(&descriptor_writes, &[]) }
         }
@@ -771,6 +791,7 @@ impl VkApp {
             format,
             vk::ImageLayout::UNDEFINED,
             vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+            1,
         );
 
         let view = Self::create_image_view(
@@ -817,6 +838,7 @@ impl VkApp {
             format,
             vk::ImageLayout::UNDEFINED,
             vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+            1,
         );
 
         let view = Self::create_image_view(device, image, 1, format, vk::ImageAspectFlags::DEPTH);
@@ -841,6 +863,168 @@ impl VkApp {
 
     fn has_stencil_component(format: vk::Format) -> bool {
         format == vk::Format::D32_SFLOAT_S8_UINT || format == vk::Format::D24_UNORM_S8_UINT
+    }
+
+    fn create_cubemap<P: AsRef<Path>>(
+        vk_context: &VkContext,
+        command_pool: vk::CommandPool,
+        copy_queue: vk::Queue,
+        pathes: [P; 6],
+    ) -> Result<Texture, anyhow::Error> {
+        let mut dims = None;
+        let mut images = Vec::new();
+        for path in pathes {
+            let image = ImageReader::open(path)
+                .context("Failed to open image")?
+                .decode()
+                .context("Failed to decode image")?
+                .flipv();
+            let image_as_rgb = image.to_rgba8();
+            let width = image_as_rgb.width();
+            let height = image_as_rgb.height();
+            if let Some((w, h)) = dims {
+                if w != width || h != height {
+                    return Err(anyhow::anyhow!("cubemap images must have all the same size"))
+                }
+            } else {
+                dims = Some((width, height));
+            }
+            let pixels = image_as_rgb.into_raw();
+            images.push(pixels);
+        }
+        let (width, height) = dims.unwrap();
+        let max_mip_levels = ((width.min(height) as f32).log2().floor() + 1.0) as u32;
+        let extent = vk::Extent2D { width, height };
+        let image_size = (images[0].len() * size_of::<u8>()) as vk::DeviceSize;
+        let device = vk_context.device();
+
+        let (buffer, memory, mem_size) = Self::create_buffer(
+            vk_context,
+            image_size * 6,
+            vk::BufferUsageFlags::TRANSFER_SRC,
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+        );
+
+        unsafe {
+            for (i, image) in images.into_iter().enumerate() {
+                let offset = image_size * i as vk::DeviceSize;
+                let ptr = device.map_memory(memory, offset, image_size, vk::MemoryMapFlags::empty())
+                    .context("Failed to map memory for cubmap image")?;
+                let mut align = ash::util::Align::new(ptr, align_of::<u8>() as _, mem_size);
+                align.copy_from_slice(&image);
+                device.unmap_memory(memory);
+            }
+        }
+
+        let (image, image_memory) = {
+            let image_info = vk::ImageCreateInfo::default()
+                .image_type(vk::ImageType::TYPE_2D)
+                .extent(vk::Extent3D {
+                    width: extent.width,
+                    height: extent.height,
+                    depth: 1,
+                })
+                .mip_levels(max_mip_levels)
+                .array_layers(6)
+                .format(vk::Format::R8G8B8A8_UNORM)
+                .tiling(vk::ImageTiling::OPTIMAL)
+                .initial_layout(vk::ImageLayout::UNDEFINED)
+                .usage(vk::ImageUsageFlags::TRANSFER_SRC
+                    | vk::ImageUsageFlags::TRANSFER_DST
+                    | vk::ImageUsageFlags::SAMPLED)
+                .sharing_mode(vk::SharingMode::EXCLUSIVE)
+                .samples(vk::SampleCountFlags::TYPE_1)
+                .flags(vk::ImageCreateFlags::CUBE_COMPATIBLE);
+            let device = vk_context.device();
+            let image = unsafe { device.create_image(&image_info, None).unwrap() };
+            let mem_requirements = unsafe { device.get_image_memory_requirements(image) };
+            let mem_type_index = Self::find_memory_type(
+                mem_requirements,
+                vk_context.get_mem_properties(),
+                vk::MemoryPropertyFlags::DEVICE_LOCAL,
+            );
+            let alloc_info = vk::MemoryAllocateInfo::default()
+                .allocation_size(mem_requirements.size)
+                .memory_type_index(mem_type_index);
+            let memory = unsafe {
+                let mem = device.allocate_memory(&alloc_info, None).unwrap();
+                device.bind_image_memory(image, mem, 0).unwrap();
+                mem
+            };
+            (image, memory)
+        };
+
+        // Transition the image layout and copy the buffer into the image
+        // and transition the layout again to be readable from fragment shader.
+        {
+            Self::transition_image_layout(
+                device,
+                command_pool,
+                copy_queue,
+                image,
+                max_mip_levels,
+                vk::Format::R8G8B8A8_UNORM,
+                vk::ImageLayout::UNDEFINED,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                6,
+            );
+
+            Self::copy_buffer_to_image(device, command_pool, copy_queue, buffer, image, extent);
+
+            Self::generate_mipmaps(
+                vk_context,
+                command_pool,
+                copy_queue,
+                image,
+                extent,
+                vk::Format::R8G8B8A8_UNORM,
+                max_mip_levels,
+            );
+        }
+
+        unsafe {
+            device.destroy_buffer(buffer, None);
+            device.free_memory(memory, None);
+        }
+
+        let create_info = vk::ImageViewCreateInfo::default()
+            .image(image)
+            .view_type(vk::ImageViewType::CUBE)
+            .format(vk::Format::R8G8B8A8_UNORM)
+            .subresource_range(vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                base_mip_level: 0,
+                level_count: max_mip_levels,
+                base_array_layer: 0,
+                layer_count: 6,
+            });
+        let image_view = unsafe {
+            device.create_image_view(&create_info, None).unwrap()
+        };
+
+        let max_aniso = vk_context.physical_device_properties().limits.max_sampler_anisotropy;
+        let sampler_info = vk::SamplerCreateInfo::default()
+            .mag_filter(vk::Filter::LINEAR)
+            .min_filter(vk::Filter::LINEAR)
+            .address_mode_u(vk::SamplerAddressMode::REPEAT)
+            .address_mode_v(vk::SamplerAddressMode::REPEAT)
+            .address_mode_w(vk::SamplerAddressMode::REPEAT)
+            .anisotropy_enable(true)
+            .max_anisotropy(max_aniso.max(16.))
+            .border_color(vk::BorderColor::INT_OPAQUE_BLACK)
+            .unnormalized_coordinates(false)
+            .compare_enable(false)
+            .compare_op(vk::CompareOp::ALWAYS)
+            .mipmap_mode(vk::SamplerMipmapMode::LINEAR)
+            .mip_lod_bias(0.0)
+            .min_lod(0.0)
+            .max_lod(max_mip_levels as _);
+        let sampler = unsafe {
+            device.create_sampler(&sampler_info, None)
+                .context("Failed to create sampler for texture")?
+        };
+
+        Ok(Texture::new(image, image_memory, image_view, Some(sampler)))
     }
 
     fn create_texture_image<P: AsRef<Path>>(
@@ -903,6 +1087,7 @@ impl VkApp {
                 vk::Format::R8G8B8A8_UNORM,
                 vk::ImageLayout::UNDEFINED,
                 vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                1,
             );
 
             Self::copy_buffer_to_image(device, command_pool, copy_queue, buffer, image, extent);
@@ -1015,6 +1200,7 @@ impl VkApp {
         format: vk::Format,
         old_layout: vk::ImageLayout,
         new_layout: vk::ImageLayout,
+        layer_count: u32,
     ) {
         Self::execute_one_time_commands(device, command_pool, transition_queue, |buffer| {
             let (src_access_mask, dst_access_mask, src_stage, dst_stage) =
@@ -1078,7 +1264,7 @@ impl VkApp {
                     base_mip_level: 0,
                     level_count: mip_levels,
                     base_array_layer: 0,
-                    layer_count: 1,
+                    layer_count,
                 })
                 .src_access_mask(src_access_mask)
                 .dst_access_mask(dst_access_mask);
@@ -2010,7 +2196,9 @@ impl Drop for VkApp {
             device.destroy_buffer(self.index_buffer, None);
             device.free_memory(self.vertex_buffer_memory, None);
             device.destroy_buffer(self.vertex_buffer, None);
-            self.texture.destroy(device);
+            for mut texture in self.textures {
+                texture.destroy(device);
+            }
             device.destroy_command_pool(self.transient_command_pool, None);
             device.destroy_command_pool(self.command_pool, None);
         }
