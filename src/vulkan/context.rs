@@ -177,7 +177,9 @@ impl VkContext {
                 }
 
                 let features = unsafe { instance.get_physical_device_features(device) };
-                if features.sampler_anisotropy != vk::TRUE {
+                if features.sampler_anisotropy != vk::TRUE
+                    || features.geometry_shader != vk::TRUE
+                {
                     return None;
                 }
 
@@ -228,7 +230,9 @@ impl VkContext {
             .map(|ext| ext.as_ptr())
             .collect::<Vec<_>>();
 
-        let device_features = vk::PhysicalDeviceFeatures::default().sampler_anisotropy(true);
+        let device_features = vk::PhysicalDeviceFeatures::default()
+            .geometry_shader(true)
+            .sampler_anisotropy(true);
 
         let device_create_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_create_infos)
