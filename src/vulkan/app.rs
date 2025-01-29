@@ -1,12 +1,12 @@
-use crate::fs;
 use crate::math::{self, Deg, Matrix4, Vector3};
-use crate::obj::Obj;
+use crate::obj::NormalizedObj;
 use super::context::VkContext;
 use super::debug::*;
 use super::structs::{ShaderSpv, UniformBufferObject, Vertex};
 use super::swapchain::{SwapchainProperties, SwapchainSupportDetails};
 use super::texture::Texture;
 
+use anyhow::Context;
 use ash::{
     ext::debug_utils,
     khr::{surface, swapchain as khr_swapchain},
@@ -70,14 +70,14 @@ pub struct VkApp {
 }
 
 impl VkApp {
-    pub fn new<P1: AsRef<Path>, P2: AsRef<Path>>(
+    pub fn new<P: AsRef<Path>>(
         window: &Window,
         width: u32,
         height: u32,
-        model_path: P1,
-        image_path: P2,
+        image_path: P,
+        nobj: NormalizedObj,
         shader_spv: ShaderSpv,
-    ) -> Self {
+    ) -> Result<Self, anyhow::Error> {
         log::debug!("Creating application.");
 
         let entry = unsafe { Entry::load().expect("Failed to create entry.") };
@@ -100,7 +100,7 @@ impl VkApp {
             instance,
             surface,
             surface_khr,
-        );
+        ).context("Failed to create vulkan context")?;
         let graphics_queue = unsafe {
             vk_context.device().get_device_queue(vk_context.graphics_queue_index(), 0)
         };
@@ -165,9 +165,9 @@ impl VkApp {
             command_pool,
             graphics_queue,
             image_path,
-        );
+        ).unwrap();
 
-        let (vertices, indices, model_extent) = Self::load_model(model_path);
+        let (vertices, indices, model_extent) = Self::load_model(nobj);
         let (vertex_buffer, vertex_buffer_memory) = Self::create_buffer_with_data::<u32, _>(
             &vk_context,
             transient_command_pool,
@@ -208,7 +208,7 @@ impl VkApp {
 
         let in_flight_frames = Self::create_sync_objects(vk_context.device());
 
-        Self {
+        Ok(Self {
             resize_dimensions: None,
             view_matrix: UniformBufferObject::view_matrix(),
             model_matrix: Matrix4::unit(),
@@ -251,7 +251,7 @@ impl VkApp {
             command_buffers,
             in_flight_frames,
             shader_spv,
-        }
+        })
     }
 
     fn create_instance(entry: &Entry, window: &Window) -> Instance {
@@ -848,8 +848,12 @@ impl VkApp {
         command_pool: vk::CommandPool,
         copy_queue: vk::Queue,
         path: P,
-    ) -> Texture {
-        let image = ImageReader::open(path).unwrap().decode().unwrap().flipv();
+    ) -> Result<Texture, anyhow::Error> {
+        let image = ImageReader::open(path)
+            .context("Failed to open image")?
+            .decode()
+            .context("Failed to decode image")?
+            .flipv();
         let image_as_rgb = image.to_rgba8();
         let width = image_as_rgb.width();
         let height = image_as_rgb.height();
@@ -868,7 +872,7 @@ impl VkApp {
 
         unsafe {
             let ptr = device.map_memory(memory, 0, image_size, vk::MemoryMapFlags::empty())
-                .unwrap();
+                .context("Failed to map memory for texture image")?;
             let mut align = ash::util::Align::new(ptr, align_of::<u8>() as _, mem_size);
             align.copy_from_slice(&pixels);
             device.unmap_memory(memory);
@@ -927,27 +931,28 @@ impl VkApp {
             vk::ImageAspectFlags::COLOR,
         );
 
-        let sampler = {
-            let sampler_info = vk::SamplerCreateInfo::default()
-                .mag_filter(vk::Filter::LINEAR)
-                .min_filter(vk::Filter::LINEAR)
-                .address_mode_u(vk::SamplerAddressMode::REPEAT)
-                .address_mode_v(vk::SamplerAddressMode::REPEAT)
-                .address_mode_w(vk::SamplerAddressMode::REPEAT)
-                .anisotropy_enable(true)
-                .max_anisotropy(16.0)
-                .border_color(vk::BorderColor::INT_OPAQUE_BLACK)
-                .unnormalized_coordinates(false)
-                .compare_enable(false)
-                .compare_op(vk::CompareOp::ALWAYS)
-                .mipmap_mode(vk::SamplerMipmapMode::LINEAR)
-                .mip_lod_bias(0.0)
-                .min_lod(0.0)
-                .max_lod(max_mip_levels as _);
-            unsafe { device.create_sampler(&sampler_info, None).unwrap() }
+        let sampler_info = vk::SamplerCreateInfo::default()
+            .mag_filter(vk::Filter::LINEAR)
+            .min_filter(vk::Filter::LINEAR)
+            .address_mode_u(vk::SamplerAddressMode::REPEAT)
+            .address_mode_v(vk::SamplerAddressMode::REPEAT)
+            .address_mode_w(vk::SamplerAddressMode::REPEAT)
+            .anisotropy_enable(true)
+            .max_anisotropy(16.0)
+            .border_color(vk::BorderColor::INT_OPAQUE_BLACK)
+            .unnormalized_coordinates(false)
+            .compare_enable(false)
+            .compare_op(vk::CompareOp::ALWAYS)
+            .mipmap_mode(vk::SamplerMipmapMode::LINEAR)
+            .mip_lod_bias(0.0)
+            .min_lod(0.0)
+            .max_lod(max_mip_levels as _);
+        let sampler = unsafe {
+            device.create_sampler(&sampler_info, None)
+                .context("Failed to create sampler for texture")?
         };
 
-        Texture::new(image, image_memory, image_view, Some(sampler))
+        Ok(Texture::new(image, image_memory, image_view, Some(sampler)))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1285,12 +1290,7 @@ impl VkApp {
         );
     }
 
-    fn load_model<P: AsRef<Path>>(path: P) -> (Vec<Vertex>, Vec<u32>, (Vector3, Vector3)) {
-        log::info!("Loading model {:?}", path.as_ref().as_os_str());
-        let cursor = fs::load(path);
-        let obj = Obj::from_reader(cursor).expect("failed to load model");
-        let nobj = obj.normalize().expect("failed to normalize model");
-
+    fn load_model(nobj: NormalizedObj) -> (Vec<Vertex>, Vec<u32>, (Vector3, Vector3)) {
         let mut min = Vector3::new(f32::MAX);
         let mut max = Vector3::new(f32::MIN);
         let vertices = nobj.vertices.iter().map(|vertex| {
@@ -1310,7 +1310,7 @@ impl VkApp {
             }
         }).collect();
 
-        (vertices, nobj.indices.clone(), (min, max))
+        (vertices, nobj.indices, (min, max))
     }
 
     fn create_buffer_with_data<T, D: Copy>(
@@ -1741,7 +1741,7 @@ impl VkApp {
         }
     }
 
-    pub fn load_new_texture<P: AsRef<Path>>(&mut self, path: P) {
+    pub fn load_new_texture<P: AsRef<Path>>(&mut self, path: P) -> Result<(), anyhow::Error> {
         log::info!("Loading image {:?}", path.as_ref().as_os_str());
         self.wait_gpu_idle();
 
@@ -1750,7 +1750,7 @@ impl VkApp {
             self.command_pool,
             self.graphics_queue,
             path,
-        );
+        )?;
         let device = self.vk_context.device();
 
         for set in self.descriptor_sets.iter() {
@@ -1785,11 +1785,12 @@ impl VkApp {
             &self.descriptor_sets,
             self.pipeline,
         );
+        Ok(())
     }
 
-    pub fn load_new_model<P: AsRef<Path>>(&mut self, path: P) {
+    pub fn load_new_model(&mut self, nobj: NormalizedObj) {
         let device = self.vk_context.device();
-        let (vertices, indices, model_extent) = Self::load_model(path);
+        let (vertices, indices, model_extent) = Self::load_model(nobj);
         self.initial_model_matrix = UniformBufferObject::model_matrix(
             model_extent.0,
             model_extent.1,

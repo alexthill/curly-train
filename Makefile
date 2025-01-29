@@ -19,7 +19,7 @@ build_release:
 
 r: run
 run: build
-	RUST_LOG=debug $(TARGET)/$(BIN_NAME)
+	@RUST_LOG=debug $(TARGET)/$(BIN_NAME)
 
 rr: run_release
 run_release: build_release

@@ -1,6 +1,7 @@
 use super::debug::setup_debug_messenger;
 use super::swapchain::SwapchainSupportDetails;
 
+use anyhow::anyhow;
 use ash::{
     ext::debug_utils,
     khr::{surface, swapchain as khr_swapchain},
@@ -31,20 +32,20 @@ impl VkContext {
         instance: Instance,
         surface: surface::Instance,
         surface_khr: vk::SurfaceKHR,
-    ) -> Self {
+    ) -> Result<Self, anyhow::Error> {
         let debug_report_callback = setup_debug_messenger(&entry, &instance);
 
         let (physical_device, queue_families_indices) =
             Self::pick_physical_device(&instance, &surface, surface_khr)
-            .expect("No suitable physical device.");
+            .ok_or(anyhow!("No suitable physical device found"))?;
 
         let device = Self::create_logical_device(
             &instance,
             physical_device,
             queue_families_indices,
-        );
+        )?;
 
-        VkContext {
+        Ok(VkContext {
             _entry: entry,
             instance,
             debug_report_callback,
@@ -53,7 +54,7 @@ impl VkContext {
             physical_device,
             device,
             queue_families_indices,
-        }
+        })
     }
 
     pub fn instance(&self) -> &Instance {
@@ -159,7 +160,7 @@ impl VkContext {
         surface: &surface::Instance,
         surface_khr: vk::SurfaceKHR,
     ) -> Option<(vk::PhysicalDevice, QueueFamiliesIndices)> {
-        let devices = unsafe { instance.enumerate_physical_devices().unwrap() };
+        let devices = unsafe { instance.enumerate_physical_devices().ok()? };
         let (device, queue_families_indices) = devices
             .into_iter()
             .filter_map(|device| {
@@ -196,7 +197,7 @@ impl VkContext {
         instance: &Instance,
         device: vk::PhysicalDevice,
         queue_families_indices: QueueFamiliesIndices,
-    ) -> Device {
+    ) -> Result<Device, anyhow::Error> {
         let graphics_family_index = queue_families_indices.graphics_index;
         let present_family_index = queue_families_indices.present_index;
         let queue_priorities = [1.0f32];
@@ -231,14 +232,11 @@ impl VkContext {
             .enabled_extension_names(&device_extensions_ptrs)
             .enabled_features(&device_features);
 
-        // Build device and queues
+        // Build device
         let device = unsafe {
-            instance
-                .create_device(device, &device_create_info, None)
-                .expect("Failed to create logical device.")
+            instance.create_device(device, &device_create_info, None)?
         };
-
-        device
+        Ok(device)
     }
 
     fn check_device_extension_support(instance: &Instance, device: vk::PhysicalDevice) -> bool {

@@ -1,14 +1,16 @@
-use scop_lib::fs::Carousel;
+use scop_lib::fs::{self, Carousel};
 use scop_lib::math::{Deg, Matrix4, Vector3};
+use scop_lib::obj::NormalizedObj;
 use scop_lib::vulkan::{ShaderSpv, VkApp};
 
+use anyhow::Context;
 use winit::{
     application::ApplicationHandler,
     dpi::PhysicalSize,
     event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
     keyboard::{Key, KeyCode, NamedKey, PhysicalKey},
-    window::{Window, WindowId},
+    window::{Fullscreen, Window, WindowId},
 };
 use std::path::Path;
 use std::time::Instant;
@@ -82,43 +84,44 @@ struct App {
     cursor_delta: [i32; 2],
     wheel_delta: f32,
     tex_weight_change: f32,
+    is_fullscreen: bool,
 
     model_carousel: Carousel,
     image_carousel: Carousel,
 }
 
-impl ApplicationHandler for App {
-    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        let window = event_loop
-            .create_window(
-                Window::default_attributes()
-                    .with_title(TITLE)
-                    .with_inner_size(PhysicalSize::new(WIDTH, HEIGHT)),
-            )
-            .unwrap();
+impl App {
+    fn init(&mut self, event_loop: &ActiveEventLoop) -> Result<(), anyhow::Error> {
+        let window_attrs = Window::default_attributes()
+            .with_title(TITLE)
+            .with_inner_size(PhysicalSize::new(WIDTH, HEIGHT));
+        let window = event_loop.create_window(window_attrs).context("Failed to create window")?;
 
-        let model_path = match self.model_carousel.get_next(0, check_if_obj) {
-            Ok(path) => path,
-            Err(err) => {
-                log::error!("failed to find a model: {err}");
-                event_loop.exit();
-                return;
-            }
-        };
-        let image_path = match self.image_carousel.get_next(0, check_if_image) {
-            Ok(path) => path,
-            Err(err) => {
-                log::error!("failed to find an image: {err}");
-                event_loop.exit();
-                return;
-            }
-        };
+        let model_path = self.model_carousel.get_next(0, check_if_obj)
+            .context("Failed to find a model")?;
+        let nobj = NormalizedObj::from_reader(fs::load(model_path)?)?;
+
+        let image_path = self.image_carousel.get_next(0, check_if_image)
+            .context("Failed to find an image")?;
         let shader_spv = ShaderSpv {
             vert: include_bytes!(concat!(env!("OUT_DIR"), "/shader.vert.spv")),
             frag: include_bytes!(concat!(env!("OUT_DIR"), "/shader.frag.spv")),
         };
-        self.vulkan = Some(VkApp::new(&window, WIDTH, HEIGHT, &model_path, image_path, shader_spv));
+        let vulkan = VkApp::new(&window, WIDTH, HEIGHT, &image_path, nobj, shader_spv)?;
+
+        self.vulkan = Some(vulkan);
         self.window = Some(window);
+        Ok(())
+    }
+}
+
+impl ApplicationHandler for App {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        if let Err(err) = self.init(event_loop) {
+            log::error!("Error while starting: {err}");
+            log::error!("{err:#?}");
+            event_loop.exit();
+        }
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
@@ -159,6 +162,15 @@ impl ApplicationHandler for App {
                     _ => {}
                 }
                 match logical_key {
+                    Key::Character(key) if pressed && key == "f" => {
+                        let fullscreen = if self.is_fullscreen {
+                            None
+                        } else {
+                            Some(Fullscreen::Borderless(None))
+                        };
+                        self.window.as_mut().unwrap().set_fullscreen(fullscreen);
+                        self.is_fullscreen = !self.is_fullscreen;
+                    }
                     Key::Character(key) if pressed && key == "i"
                         => self.load_next_image = true,
                     Key::Character(key) if pressed && key == "r"
@@ -261,16 +273,29 @@ impl ApplicationHandler for App {
         if self.load_next_model || self.load_prev_model {
             let offset = self.load_next_model as isize - self.load_prev_model as isize;
             match self.model_carousel.get_next(offset, check_if_obj) {
-                Ok(path) => app.load_new_model(&path),
-                Err(err) => log::warn!("failed to find a model: {err}"),
+                Ok(path) => {
+                    fn get_nobj(path: &Path) -> Result<NormalizedObj, anyhow::Error> {
+                        Ok(NormalizedObj::from_reader(fs::load(path)?)?)
+                    }
+                    match get_nobj(&path) {
+                        Ok(nobj) => app.load_new_model(nobj),
+                        Err(err) => log::warn!("Failed to load model {}: {err}", path.display()),
+                    }
+                }
+                Err(err) => log::warn!("Failed to find a model: {err}"),
             };
             self.load_next_model = false;
             self.load_prev_model = false;
         }
         if self.load_next_image {
             match self.image_carousel.get_next(1, check_if_image) {
-                Ok(path) => app.load_new_texture(&path),
-                Err(err) => log::warn!("failed to find an image: {err}"),
+                Ok(path) => {
+                    if let Err(err) = app.load_new_texture(&path) {
+                        log::warn!("Error while loading new image: {err}");
+                        log::warn!("{err:#?}");
+                    }
+                }
+                Err(err) => log::warn!("Failed to find an image: {err}"),
             };
             self.load_next_image = false;
         }

@@ -126,6 +126,12 @@ pub struct NormalizedObj {
     pub has_tex_coords: bool,
 }
 
+impl NormalizedObj {
+    pub fn from_reader(reader: impl BufRead) -> Result<Self, ObjError> {
+        Obj::from_reader(reader).map_err(|(err, _)| err)?.normalize()
+    }
+}
+
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
 pub struct Vertex {
     pub pos_coords: [f32; 3],
