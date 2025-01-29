@@ -931,6 +931,7 @@ impl VkApp {
             vk::ImageAspectFlags::COLOR,
         );
 
+        let max_aniso = vk_context.physical_device_properties().limits.max_sampler_anisotropy;
         let sampler_info = vk::SamplerCreateInfo::default()
             .mag_filter(vk::Filter::LINEAR)
             .min_filter(vk::Filter::LINEAR)
@@ -938,7 +939,7 @@ impl VkApp {
             .address_mode_v(vk::SamplerAddressMode::REPEAT)
             .address_mode_w(vk::SamplerAddressMode::REPEAT)
             .anisotropy_enable(true)
-            .max_anisotropy(16.0)
+            .max_anisotropy(max_aniso.max(16.))
             .border_color(vk::BorderColor::INT_OPAQUE_BLACK)
             .unnormalized_coordinates(false)
             .compare_enable(false)

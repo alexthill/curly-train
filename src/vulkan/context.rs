@@ -85,6 +85,12 @@ impl VkContext {
         self.queue_families_indices.present_index
     }
 
+    pub fn physical_device_properties(&self) -> vk::PhysicalDeviceProperties {
+        unsafe {
+            self.instance.get_physical_device_properties(self.physical_device)
+        }
+    }
+
     pub fn get_mem_properties(&self) -> vk::PhysicalDeviceMemoryProperties {
         unsafe {
             self.instance.get_physical_device_memory_properties(self.physical_device)
@@ -110,8 +116,7 @@ impl VkContext {
     ) -> Option<vk::Format> {
         candidates.iter().cloned().find(|candidate| {
             let props = unsafe {
-                self.instance
-                    .get_physical_device_format_properties(self.physical_device, *candidate)
+                self.instance.get_physical_device_format_properties(self.physical_device, *candidate)
             };
             (tiling == vk::ImageTiling::LINEAR && props.linear_tiling_features.contains(features))
                 || (tiling == vk::ImageTiling::OPTIMAL
@@ -121,9 +126,7 @@ impl VkContext {
 
     /// Return the maximum sample count supported.
     pub fn get_max_usable_sample_count(&self) -> vk::SampleCountFlags {
-        let props = unsafe {
-            self.instance.get_physical_device_properties(self.physical_device)
-        };
+        let props = self.physical_device_properties();
         let color_sample_counts = props.limits.framebuffer_color_sample_counts;
         let depth_sample_counts = props.limits.framebuffer_depth_sample_counts;
         let sample_counts = color_sample_counts.min(depth_sample_counts);
