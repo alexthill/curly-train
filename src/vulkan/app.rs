@@ -853,6 +853,7 @@ impl VkApp {
                 extent,
                 vk::Format::R8G8B8A8_UNORM,
                 max_mip_levels,
+                6,
             );
         }
 
@@ -974,6 +975,7 @@ impl VkApp {
                 extent,
                 vk::Format::R8G8B8A8_UNORM,
                 max_mip_levels,
+                1,
             );
         }
 
@@ -1198,6 +1200,7 @@ impl VkApp {
         extent: vk::Extent2D,
         format: vk::Format,
         mip_levels: u32,
+        layer_count: u32,
     ) {
         let format_properties = unsafe {
             vk_context.instance()
@@ -1221,7 +1224,7 @@ impl VkApp {
                     .subresource_range(vk::ImageSubresourceRange {
                         aspect_mask: vk::ImageAspectFlags::COLOR,
                         base_array_layer: 0,
-                        layer_count: 1,
+                        layer_count,
                         level_count: 1,
                         ..Default::default()
                     });
