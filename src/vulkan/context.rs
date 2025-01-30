@@ -97,6 +97,30 @@ impl VkContext {
         }
     }
 
+    /// Find a memory type in `mem_properties` that is suitable
+    /// for `requirements` and supports `required_properties`.
+    ///
+    /// # Returns
+    ///
+    /// The index of the memory type from `mem_properties`.
+    pub fn find_memory_type(
+        &self,
+        requirements: vk::MemoryRequirements,
+        required_properties: vk::MemoryPropertyFlags,
+    ) -> u32 {
+        let mem_properties = self.get_mem_properties();
+        for i in 0..mem_properties.memory_type_count {
+            if requirements.memory_type_bits & (1 << i) != 0
+                && mem_properties.memory_types[i as usize]
+                    .property_flags
+                    .contains(required_properties)
+            {
+                return i;
+            }
+        }
+        panic!("Failed to find suitable memory type.")
+    }
+
     pub fn create_command_pool(&self, create_flags: vk::CommandPoolCreateFlags) -> vk::CommandPool {
         let command_pool_info = vk::CommandPoolCreateInfo::default()
             .queue_family_index(self.queue_families_indices.graphics_index)

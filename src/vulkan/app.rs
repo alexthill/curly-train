@@ -1,7 +1,11 @@
+use crate::fs;
 use crate::math::{self, Deg, Matrix4, Vector3};
 use crate::obj::NormalizedObj;
+use super::buffer;
+use super::cmd;
 use super::context::VkContext;
 use super::debug::*;
+use super::pipeline::{Geometry, Pipeline};
 use super::structs::{ShaderSpv, UniformBufferObject, Vertex};
 use super::swapchain::{SwapchainProperties, SwapchainSupportDetails};
 use super::texture::Texture;
@@ -15,10 +19,8 @@ use ash::{
 use image::ImageReader;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use std::{
-    error::Error,
     ffi::CString,
-    io::Cursor,
-    mem::{align_of, size_of, size_of_val},
+    mem::{align_of, size_of},
     path::Path,
 };
 use winit::window::Window;
@@ -28,7 +30,6 @@ const MAX_FRAMES_IN_FLIGHT: u32 = 2;
 pub struct VkApp {
     pub dirty_swapchain: bool,
 
-    resize_dimensions: Option<[u32; 2]>,
     pub view_matrix: Matrix4,
     pub model_matrix: Matrix4,
     pub texture_weight: f32,
@@ -45,8 +46,8 @@ pub struct VkApp {
     swapchain_image_views: Vec<vk::ImageView>,
     render_pass: vk::RenderPass,
     descriptor_set_layout: vk::DescriptorSetLayout,
-    pipeline_layout: vk::PipelineLayout,
-    pipeline: vk::Pipeline,
+    pipeline: Pipeline,
+    pipeline_cubemap: Pipeline,
     swapchain_framebuffers: Vec<vk::Framebuffer>,
     command_pool: vk::CommandPool,
     transient_command_pool: vk::CommandPool,
@@ -55,11 +56,6 @@ pub struct VkApp {
     depth_format: vk::Format,
     depth_texture: Texture,
     textures: [Texture; 2],
-    model_index_count: usize,
-    vertex_buffer: vk::Buffer,
-    vertex_buffer_memory: vk::DeviceMemory,
-    index_buffer: vk::Buffer,
-    index_buffer_memory: vk::DeviceMemory,
     uniform_buffers: Vec<vk::Buffer>,
     uniform_buffer_memories: Vec<vk::DeviceMemory>,
     descriptor_pool: vk::DescriptorPool,
@@ -67,6 +63,7 @@ pub struct VkApp {
     command_buffers: Vec<vk::CommandBuffer>,
     in_flight_frames: InFlightFrames,
     shader_spv: ShaderSpv,
+    cubemap_spv: ShaderSpv,
 }
 
 impl VkApp {
@@ -77,6 +74,7 @@ impl VkApp {
         image_path: P,
         nobj: NormalizedObj,
         shader_spv: ShaderSpv,
+        cubemap_spv: ShaderSpv,
     ) -> Result<Self, anyhow::Error> {
         log::debug!("Creating application.");
 
@@ -120,14 +118,6 @@ impl VkApp {
         let render_pass =
             Self::create_render_pass(vk_context.device(), properties, msaa_samples, depth_format);
         let descriptor_set_layout = Self::create_descriptor_set_layout(vk_context.device());
-        let (pipeline, layout) = Self::create_pipeline(
-            vk_context.device(),
-            properties,
-            msaa_samples,
-            render_pass,
-            descriptor_set_layout,
-            shader_spv,
-        );
 
         let command_pool =
             vk_context.create_command_pool(vk::CommandPoolCreateFlags::empty());
@@ -180,19 +170,47 @@ impl VkApp {
             ],
         ).unwrap();
 
-        let (vertices, indices, model_extent) = Self::load_model(nobj);
-        let (vertex_buffer, vertex_buffer_memory) = Self::create_buffer_with_data::<u32, _>(
-            &vk_context,
-            transient_command_pool,
-            graphics_queue,
-            &vertices,
-        );
-        let (index_buffer, index_buffer_memory) = Self::create_buffer_with_data::<u16, _>(
-            &vk_context,
-            transient_command_pool,
-            graphics_queue,
-            &indices,
-        );
+        let (pipeline, model_extent) = {
+            let mut pipeline = Pipeline::new(
+                vk_context.device(),
+                properties,
+                msaa_samples,
+                render_pass,
+                descriptor_set_layout,
+                shader_spv,
+            );
+            let (vertices, indices, model_extent) = Self::load_model(nobj);
+            pipeline.geometry = Some(Geometry::new(
+                &vk_context,
+                transient_command_pool,
+                graphics_queue,
+                &vertices,
+                &indices,
+            ));
+            (pipeline, model_extent)
+        };
+
+        let pipeline_cubemap = {
+            let mut pipeline = Pipeline::new(
+                vk_context.device(),
+                properties,
+                msaa_samples,
+                render_pass,
+                descriptor_set_layout,
+                cubemap_spv,
+            );
+            let nobj = NormalizedObj::from_reader(fs::load("assets/cubemap/skybox.obj")?)?;
+            let (vertices, indices, _) = Self::load_model(nobj);
+            pipeline.geometry = Some(Geometry::new(
+                &vk_context,
+                transient_command_pool,
+                graphics_queue,
+                &vertices,
+                &indices,
+            ));
+            pipeline
+        };
+
         let (uniform_buffers, uniform_buffer_memories) =
             Self::create_uniform_buffers(&vk_context, images.len());
 
@@ -202,8 +220,8 @@ impl VkApp {
             descriptor_pool,
             descriptor_set_layout,
             &uniform_buffers,
-            // &[texture, texture_cubemap],
-            &[texture],
+            &[texture, texture_cubemap],
+            //&[texture],
         );
 
         let command_buffers = Self::create_and_register_command_buffers(
@@ -212,18 +230,13 @@ impl VkApp {
             &swapchain_framebuffers,
             render_pass,
             properties,
-            vertex_buffer,
-            index_buffer,
-            indices.len(),
-            layout,
             &descriptor_sets,
-            pipeline,
+            &[pipeline_cubemap, pipeline],
         );
 
         let in_flight_frames = Self::create_sync_objects(vk_context.device());
 
         Ok(Self {
-            resize_dimensions: None,
             view_matrix: UniformBufferObject::view_matrix(),
             model_matrix: Matrix4::unit(),
             initial_model_matrix: UniformBufferObject::model_matrix(
@@ -243,8 +256,8 @@ impl VkApp {
             swapchain_image_views,
             render_pass,
             descriptor_set_layout,
-            pipeline_layout: layout,
             pipeline,
+            pipeline_cubemap,
             swapchain_framebuffers,
             command_pool,
             transient_command_pool,
@@ -253,11 +266,6 @@ impl VkApp {
             depth_format,
             depth_texture,
             textures: [texture, texture_cubemap],
-            model_index_count: indices.len(),
-            vertex_buffer,
-            vertex_buffer_memory,
-            index_buffer,
-            index_buffer_memory,
             uniform_buffers,
             uniform_buffer_memories,
             descriptor_pool,
@@ -265,6 +273,7 @@ impl VkApp {
             command_buffers,
             in_flight_frames,
             shader_spv,
+            cubemap_spv,
         })
     }
 
@@ -513,7 +522,12 @@ impl VkApp {
             .descriptor_count(1)
             .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
             .stage_flags(vk::ShaderStageFlags::FRAGMENT);
-        let bindings = [ubo_binding, sampler_binding];
+        let cubemap_binding = vk::DescriptorSetLayoutBinding::default()
+            .binding(2)
+            .descriptor_count(1)
+            .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+            .stage_flags(vk::ShaderStageFlags::FRAGMENT);
+        let bindings = [ubo_binding, sampler_binding, cubemap_binding];
         let layout_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
 
         unsafe {
@@ -523,17 +537,16 @@ impl VkApp {
 
     /// Create a descriptor pool to allocate the descriptor sets.
     fn create_descriptor_pool(device: &Device, size: u32) -> vk::DescriptorPool {
-        let ubo_pool_size = vk::DescriptorPoolSize {
-            ty: vk::DescriptorType::UNIFORM_BUFFER,
-            descriptor_count: size,
-        };
-        let sampler_pool_size = vk::DescriptorPoolSize {
-            ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-            descriptor_count: size,
-        };
-
-        let pool_sizes = [ubo_pool_size, sampler_pool_size];
-
+        let pool_sizes = [
+            vk::DescriptorPoolSize {
+                ty: vk::DescriptorType::UNIFORM_BUFFER,
+                descriptor_count: size,
+            },
+            vk::DescriptorPoolSize {
+                ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                descriptor_count: size * 2,
+            },
+        ];
         let pool_info = vk::DescriptorPoolCreateInfo::default()
             .pool_sizes(&pool_sizes)
             .max_sets(size);
@@ -563,182 +576,44 @@ impl VkApp {
                 .offset(0)
                 .range(size_of::<UniformBufferObject>() as vk::DeviceSize);
             let buffer_infos = [buffer_info];
-
-            let mut descriptor_writes = Vec::new();
-
             let ubo_descriptor_write = vk::WriteDescriptorSet::default()
                 .dst_set(*set)
                 .dst_binding(0)
                 .dst_array_element(0)
                 .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
                 .buffer_info(&buffer_infos);
-            descriptor_writes.push(ubo_descriptor_write);
 
-            let image_infos = textures.iter().map(|texture| {
-                [vk::DescriptorImageInfo::default()
-                    .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-                    .image_view(texture.view)
-                    .sampler(texture.sampler.unwrap())]
-            }).collect::<Box<[_]>>();
+            let model_texture = textures[0];
+            let image_info = vk::DescriptorImageInfo::default()
+                .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                .image_view(model_texture.view)
+                .sampler(model_texture.sampler.unwrap());
+            let image_infos = [image_info];
+            let sampler_descriptor_write = vk::WriteDescriptorSet::default()
+                .dst_set(*set)
+                .dst_binding(1)
+                .dst_array_element(0)
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .image_info(&image_infos);
 
-            for (i, _) in textures.iter().enumerate() {
-                let sampler_descriptor_write = vk::WriteDescriptorSet::default()
-                    .dst_set(*set)
-                    .dst_binding(i as u32 + 1)
-                    .dst_array_element(0)
-                    .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                    .image_info(&image_infos[i]);
-                descriptor_writes.push(sampler_descriptor_write);
-            }
+            let cubemap_texture = textures[1];
+            let image_info = vk::DescriptorImageInfo::default()
+                .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                .image_view(cubemap_texture.view)
+                .sampler(cubemap_texture.sampler.unwrap());
+            let image_infos2 = [image_info];
+            let sampler2_descriptor_write = vk::WriteDescriptorSet::default()
+                .dst_set(*set)
+                .dst_binding(2)
+                .dst_array_element(0)
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .image_info(&image_infos2);
 
-            unsafe { device.update_descriptor_sets(&descriptor_writes, &[]) }
+            let writes = [ubo_descriptor_write, sampler_descriptor_write, sampler2_descriptor_write];
+            unsafe { device.update_descriptor_sets(&writes, &[]) }
         }
 
         descriptor_sets
-    }
-
-    fn create_pipeline(
-        device: &Device,
-        swapchain_properties: SwapchainProperties,
-        msaa_samples: vk::SampleCountFlags,
-        render_pass: vk::RenderPass,
-        descriptor_set_layout: vk::DescriptorSetLayout,
-        shader_spv: ShaderSpv,
-    ) -> (vk::Pipeline, vk::PipelineLayout) {
-        fn create_shader_module(
-            device: &Device,
-            bytes: &[u8],
-        ) -> Result<vk::ShaderModule, Box<dyn Error>> {
-            let mut cursor = Cursor::new(bytes);
-            let code = ash::util::read_spv(&mut cursor)?;
-            let create_info = vk::ShaderModuleCreateInfo::default().code(&code);
-            unsafe {
-                Ok(device.create_shader_module(&create_info, None)?)
-            }
-        }
-
-        let vertex_shader_module = create_shader_module(device, shader_spv.vert)
-            .expect("failed to load vertex shader spv file");
-        let fragment_shader_module = create_shader_module(device, shader_spv.frag)
-            .expect("failed to load fragment shader spv file");
-
-        let entry_point_name = CString::new("main").unwrap();
-        let vertex_shader_state_info = vk::PipelineShaderStageCreateInfo::default()
-            .stage(vk::ShaderStageFlags::VERTEX)
-            .module(vertex_shader_module)
-            .name(&entry_point_name);
-        let fragment_shader_state_info = vk::PipelineShaderStageCreateInfo::default()
-            .stage(vk::ShaderStageFlags::FRAGMENT)
-            .module(fragment_shader_module)
-            .name(&entry_point_name);
-        let shader_states_infos = [vertex_shader_state_info, fragment_shader_state_info];
-
-        let vertex_binding_descs = [Vertex::get_binding_description()];
-        let vertex_attribute_descs = Vertex::get_attribute_descriptions();
-        let vertex_input_info = vk::PipelineVertexInputStateCreateInfo::default()
-            .vertex_binding_descriptions(&vertex_binding_descs)
-            .vertex_attribute_descriptions(&vertex_attribute_descs);
-
-        let input_assembly_info = vk::PipelineInputAssemblyStateCreateInfo::default()
-            .topology(vk::PrimitiveTopology::TRIANGLE_LIST)
-            .primitive_restart_enable(false);
-
-        let viewport = vk::Viewport {
-            x: 0.0,
-            y: 0.0,
-            width: swapchain_properties.extent.width as _,
-            height: swapchain_properties.extent.height as _,
-            min_depth: 0.0,
-            max_depth: 1.0,
-        };
-        let viewports = [viewport];
-        let scissor = vk::Rect2D {
-            offset: vk::Offset2D { x: 0, y: 0 },
-            extent: swapchain_properties.extent,
-        };
-        let scissors = [scissor];
-        let viewport_info = vk::PipelineViewportStateCreateInfo::default()
-            .viewports(&viewports)
-            .scissors(&scissors);
-
-        let rasterizer_info = vk::PipelineRasterizationStateCreateInfo::default()
-            .depth_clamp_enable(false)
-            .rasterizer_discard_enable(false)
-            .polygon_mode(vk::PolygonMode::FILL)
-            .line_width(1.0)
-            .cull_mode(vk::CullModeFlags::NONE)
-            .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
-            .depth_bias_enable(false)
-            .depth_bias_constant_factor(0.0)
-            .depth_bias_clamp(0.0)
-            .depth_bias_slope_factor(0.0);
-
-        let multisampling_info = vk::PipelineMultisampleStateCreateInfo::default()
-            .sample_shading_enable(false)
-            .rasterization_samples(msaa_samples)
-            .min_sample_shading(1.0)
-            .alpha_to_coverage_enable(false)
-            .alpha_to_one_enable(false);
-
-        let depth_stencil_info = vk::PipelineDepthStencilStateCreateInfo::default()
-            .depth_test_enable(true)
-            .depth_write_enable(true)
-            .depth_compare_op(vk::CompareOp::LESS)
-            .depth_bounds_test_enable(false)
-            .min_depth_bounds(0.0)
-            .max_depth_bounds(1.0)
-            .stencil_test_enable(false)
-            .front(Default::default())
-            .back(Default::default());
-
-        let color_blend_attachment = vk::PipelineColorBlendAttachmentState::default()
-            .color_write_mask(vk::ColorComponentFlags::RGBA)
-            .blend_enable(false)
-            .src_color_blend_factor(vk::BlendFactor::ONE)
-            .dst_color_blend_factor(vk::BlendFactor::ZERO)
-            .color_blend_op(vk::BlendOp::ADD)
-            .src_alpha_blend_factor(vk::BlendFactor::ONE)
-            .dst_alpha_blend_factor(vk::BlendFactor::ZERO)
-            .alpha_blend_op(vk::BlendOp::ADD);
-        let color_blend_attachments = [color_blend_attachment];
-
-        let color_blending_info = vk::PipelineColorBlendStateCreateInfo::default()
-            .logic_op_enable(false)
-            .logic_op(vk::LogicOp::COPY)
-            .attachments(&color_blend_attachments)
-            .blend_constants([0.0, 0.0, 0.0, 0.0]);
-
-        let layout = {
-            let layouts = [descriptor_set_layout];
-            let layout_info = vk::PipelineLayoutCreateInfo::default().set_layouts(&layouts);
-            unsafe { device.create_pipeline_layout(&layout_info, None).unwrap() }
-        };
-
-        let pipeline_info = vk::GraphicsPipelineCreateInfo::default()
-            .stages(&shader_states_infos)
-            .vertex_input_state(&vertex_input_info)
-            .input_assembly_state(&input_assembly_info)
-            .viewport_state(&viewport_info)
-            .rasterization_state(&rasterizer_info)
-            .multisample_state(&multisampling_info)
-            .depth_stencil_state(&depth_stencil_info)
-            .color_blend_state(&color_blending_info)
-            .layout(layout)
-            .render_pass(render_pass)
-            .subpass(0);
-        let pipeline_infos = [pipeline_info];
-
-        let pipeline = unsafe {
-            device.create_graphics_pipelines(vk::PipelineCache::null(), &pipeline_infos, None)
-                .unwrap()[0]
-        };
-
-        unsafe {
-            device.destroy_shader_module(vertex_shader_module, None);
-            device.destroy_shader_module(fragment_shader_module, None);
-        };
-
-        (pipeline, layout)
     }
 
     fn create_framebuffers(
@@ -898,7 +773,7 @@ impl VkApp {
         let image_size = (images[0].len() * size_of::<u8>()) as vk::DeviceSize;
         let device = vk_context.device();
 
-        let (buffer, memory, mem_size) = Self::create_buffer(
+        let (buffer, memory, mem_size) = buffer::create_buffer(
             vk_context,
             image_size * 6,
             vk::BufferUsageFlags::TRANSFER_SRC,
@@ -938,9 +813,8 @@ impl VkApp {
             let device = vk_context.device();
             let image = unsafe { device.create_image(&image_info, None).unwrap() };
             let mem_requirements = unsafe { device.get_image_memory_requirements(image) };
-            let mem_type_index = Self::find_memory_type(
+            let mem_type_index = vk_context.find_memory_type(
                 mem_requirements,
-                vk_context.get_mem_properties(),
                 vk::MemoryPropertyFlags::DEVICE_LOCAL,
             );
             let alloc_info = vk::MemoryAllocateInfo::default()
@@ -1047,7 +921,7 @@ impl VkApp {
         let image_size = (pixels.len() * size_of::<u8>()) as vk::DeviceSize;
         let device = vk_context.device();
 
-        let (buffer, memory, mem_size) = Self::create_buffer(
+        let (buffer, memory, mem_size) = buffer::create_buffer(
             vk_context,
             image_size,
             vk::BufferUsageFlags::TRANSFER_SRC,
@@ -1172,12 +1046,7 @@ impl VkApp {
         let device = vk_context.device();
         let image = unsafe { device.create_image(&image_info, None).unwrap() };
         let mem_requirements = unsafe { device.get_image_memory_requirements(image) };
-        let mem_type_index = Self::find_memory_type(
-            mem_requirements,
-            vk_context.get_mem_properties(),
-            mem_properties,
-        );
-
+        let mem_type_index = vk_context.find_memory_type(mem_requirements, mem_properties);
         let alloc_info = vk::MemoryAllocateInfo::default()
             .allocation_size(mem_requirements.size)
             .memory_type_index(mem_type_index);
@@ -1202,7 +1071,7 @@ impl VkApp {
         new_layout: vk::ImageLayout,
         layer_count: u32,
     ) {
-        Self::execute_one_time_commands(device, command_pool, transition_queue, |buffer| {
+        cmd::execute_one_time_commands(device, command_pool, transition_queue, |buffer| {
             let (src_access_mask, dst_access_mask, src_stage, dst_stage) =
                 match (old_layout, new_layout) {
                     (vk::ImageLayout::UNDEFINED, vk::ImageLayout::TRANSFER_DST_OPTIMAL) => (
@@ -1291,7 +1160,7 @@ impl VkApp {
         image: vk::Image,
         extent: vk::Extent2D,
     ) {
-        Self::execute_one_time_commands(device, command_pool, transition_queue, |command_buffer| {
+        cmd::execute_one_time_commands(device, command_pool, transition_queue, |command_buffer| {
             let region = vk::BufferImageCopy::default()
                 .buffer_offset(0)
                 .buffer_row_length(0)
@@ -1340,7 +1209,7 @@ impl VkApp {
             panic!("Linear blitting is not supported for format {:?}.", format)
         }
 
-        Self::execute_one_time_commands(
+        cmd::execute_one_time_commands(
             vk_context.device(),
             command_pool,
             transfer_queue,
@@ -1500,76 +1369,6 @@ impl VkApp {
         (vertices, nobj.indices, (min, max))
     }
 
-    fn create_buffer_with_data<T, D: Copy>(
-        vk_context: &VkContext,
-        command_pool: vk::CommandPool,
-        transfer_queue: vk::Queue,
-        data: &[D],
-    ) -> (vk::Buffer, vk::DeviceMemory) {
-        Self::create_device_local_buffer_with_data::<T, _>(
-            vk_context,
-            command_pool,
-            transfer_queue,
-            vk::BufferUsageFlags::VERTEX_BUFFER,
-            data,
-        )
-    }
-
-    /// Create a buffer and its gpu memory and fill it.
-    ///
-    /// This function internally creates an host visible staging buffer and
-    /// a device local buffer. The data is first copied from the cpu to the
-    /// staging buffer. Then we copy the data from the staging buffer to the
-    /// final buffer using a one-time command buffer.
-    fn create_device_local_buffer_with_data<A, T: Copy>(
-        vk_context: &VkContext,
-        command_pool: vk::CommandPool,
-        transfer_queue: vk::Queue,
-        usage: vk::BufferUsageFlags,
-        data: &[T],
-    ) -> (vk::Buffer, vk::DeviceMemory) {
-        let device = vk_context.device();
-        let size = size_of_val(data) as vk::DeviceSize;
-        let (staging_buffer, staging_memory, staging_mem_size) = Self::create_buffer(
-            vk_context,
-            size,
-            vk::BufferUsageFlags::TRANSFER_SRC,
-            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-        );
-
-        unsafe {
-            let data_ptr = device
-                .map_memory(staging_memory, 0, size, vk::MemoryMapFlags::empty())
-                .unwrap();
-            let mut align = ash::util::Align::new(data_ptr, align_of::<A>() as _, staging_mem_size);
-            align.copy_from_slice(data);
-            device.unmap_memory(staging_memory);
-        };
-
-        let (buffer, memory, _) = Self::create_buffer(
-            vk_context,
-            size,
-            vk::BufferUsageFlags::TRANSFER_DST | usage,
-            vk::MemoryPropertyFlags::DEVICE_LOCAL,
-        );
-
-        Self::copy_buffer(
-            device,
-            command_pool,
-            transfer_queue,
-            staging_buffer,
-            buffer,
-            size,
-        );
-
-        unsafe {
-            device.destroy_buffer(staging_buffer, None);
-            device.free_memory(staging_memory, None);
-        };
-
-        (buffer, memory)
-    }
-
     fn create_uniform_buffers(
         vk_context: &VkContext,
         count: usize,
@@ -1579,7 +1378,7 @@ impl VkApp {
         let mut memories = Vec::new();
 
         for _ in 0..count {
-            let (buffer, memory, _) = Self::create_buffer(
+            let (buffer, memory, _) = buffer::create_buffer(
                 vk_context,
                 size,
                 vk::BufferUsageFlags::UNIFORM_BUFFER,
@@ -1592,141 +1391,6 @@ impl VkApp {
         (buffers, memories)
     }
 
-    /// Create a buffer and allocate its memory.
-    ///
-    /// # Returns
-    ///
-    /// The buffer, its memory and the actual size in bytes of the
-    /// allocated memory since in may differ from the requested size.
-    fn create_buffer(
-        vk_context: &VkContext,
-        size: vk::DeviceSize,
-        usage: vk::BufferUsageFlags,
-        mem_properties: vk::MemoryPropertyFlags,
-    ) -> (vk::Buffer, vk::DeviceMemory, vk::DeviceSize) {
-        let device = vk_context.device();
-        let buffer = {
-            let buffer_info = vk::BufferCreateInfo::default()
-                .size(size)
-                .usage(usage)
-                .sharing_mode(vk::SharingMode::EXCLUSIVE);
-            unsafe { device.create_buffer(&buffer_info, None).unwrap() }
-        };
-
-        let mem_requirements = unsafe { device.get_buffer_memory_requirements(buffer) };
-        let memory = {
-            let mem_type = Self::find_memory_type(
-                mem_requirements,
-                vk_context.get_mem_properties(),
-                mem_properties,
-            );
-
-            let alloc_info = vk::MemoryAllocateInfo::default()
-                .allocation_size(mem_requirements.size)
-                .memory_type_index(mem_type);
-            unsafe { device.allocate_memory(&alloc_info, None).unwrap() }
-        };
-
-        unsafe { device.bind_buffer_memory(buffer, memory, 0).unwrap() };
-
-        (buffer, memory, mem_requirements.size)
-    }
-
-    /// Copy the `size` first bytes of `src` into `dst`.
-    ///
-    /// It's done using a command buffer allocated from `command_pool`.
-    /// The command buffer is submitted to `transfer_queue`.
-    fn copy_buffer(
-        device: &Device,
-        command_pool: vk::CommandPool,
-        transfer_queue: vk::Queue,
-        src: vk::Buffer,
-        dst: vk::Buffer,
-        size: vk::DeviceSize,
-    ) {
-        Self::execute_one_time_commands(device, command_pool, transfer_queue, |buffer| {
-            let region = vk::BufferCopy {
-                src_offset: 0,
-                dst_offset: 0,
-                size,
-            };
-            let regions = [region];
-
-            unsafe { device.cmd_copy_buffer(buffer, src, dst, &regions) };
-        });
-    }
-
-    /// Create a one time use command buffer and pass it to `executor`.
-    fn execute_one_time_commands<F: FnOnce(vk::CommandBuffer)>(
-        device: &Device,
-        command_pool: vk::CommandPool,
-        queue: vk::Queue,
-        executor: F,
-    ) {
-        let command_buffer = {
-            let alloc_info = vk::CommandBufferAllocateInfo::default()
-                .level(vk::CommandBufferLevel::PRIMARY)
-                .command_pool(command_pool)
-                .command_buffer_count(1);
-
-            unsafe { device.allocate_command_buffers(&alloc_info).unwrap()[0] }
-        };
-        let command_buffers = [command_buffer];
-
-        // Begin recording
-        {
-            let begin_info = vk::CommandBufferBeginInfo::default()
-                .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
-            unsafe {
-                device.begin_command_buffer(command_buffer, &begin_info).unwrap()
-            };
-        }
-
-        // Execute user function
-        executor(command_buffer);
-
-        // End recording
-        unsafe { device.end_command_buffer(command_buffer).unwrap() };
-
-        // Submit and wait
-        {
-            let submit_info = vk::SubmitInfo::default().command_buffers(&command_buffers);
-            let submit_infos = [submit_info];
-            unsafe {
-                device
-                    .queue_submit(queue, &submit_infos, vk::Fence::null())
-                    .unwrap();
-                device.queue_wait_idle(queue).unwrap();
-            };
-        }
-
-        // Free
-        unsafe { device.free_command_buffers(command_pool, &command_buffers) };
-    }
-
-    /// Find a memory type in `mem_properties` that is suitable
-    /// for `requirements` and supports `required_properties`.
-    ///
-    /// # Returns
-    ///
-    /// The index of the memory type from `mem_properties`.
-    fn find_memory_type(
-        requirements: vk::MemoryRequirements,
-        mem_properties: vk::PhysicalDeviceMemoryProperties,
-        required_properties: vk::MemoryPropertyFlags,
-    ) -> u32 {
-        for i in 0..mem_properties.memory_type_count {
-            if requirements.memory_type_bits & (1 << i) != 0
-                && mem_properties.memory_types[i as usize]
-                    .property_flags
-                    .contains(required_properties)
-            {
-                return i;
-            }
-        }
-        panic!("Failed to find suitable memory type.")
-    }
-
     #[allow(clippy::too_many_arguments)]
     fn create_and_register_command_buffers(
         device: &Device,
@@ -1734,18 +1398,15 @@ impl VkApp {
         framebuffers: &[vk::Framebuffer],
         render_pass: vk::RenderPass,
         swapchain_properties: SwapchainProperties,
-        vertex_buffer: vk::Buffer,
-        index_buffer: vk::Buffer,
-        index_count: usize,
-        pipeline_layout: vk::PipelineLayout,
         descriptor_sets: &[vk::DescriptorSet],
-        graphics_pipeline: vk::Pipeline,
+        pipelines: &[Pipeline],
     ) -> Vec<vk::CommandBuffer> {
         let allocate_info = vk::CommandBufferAllocateInfo::default()
             .command_pool(pool)
             .level(vk::CommandBufferLevel::PRIMARY)
             .command_buffer_count(framebuffers.len() as _);
         let buffers = unsafe { device.allocate_command_buffers(&allocate_info).unwrap() };
+        log::debug!("create_and_register_command_buffers with count {}", buffers.len());
 
         for (i, &buffer) in buffers.iter().enumerate() {
             // begin command buffer
@@ -1785,29 +1446,32 @@ impl VkApp {
                 )
             };
 
-            unsafe {
-                device.cmd_bind_pipeline(buffer, vk::PipelineBindPoint::GRAPHICS, graphics_pipeline)
-            };
+            for pipeline in pipelines {
+                // bind pipeline, vertex and index buffer
+                let mut index_count = 0;
+                unsafe {
+                    device.cmd_bind_pipeline(buffer, vk::PipelineBindPoint::GRAPHICS, pipeline.pipeline);
+                    if let Some(g) = pipeline.geometry {
+                        device.cmd_bind_vertex_buffers(buffer, 0, &[g.vertex_buffer], &[0]);
+                        device.cmd_bind_index_buffer(buffer, g.index_buffer, 0, vk::IndexType::UINT32);
+                        index_count = g.index_count;
+                    }
+                };
 
-            // bind vertex and index buffer
-            unsafe {
-                device.cmd_bind_vertex_buffers(buffer, 0, &[vertex_buffer], &[0]);
-                device.cmd_bind_index_buffer(buffer, index_buffer, 0, vk::IndexType::UINT32);
-            };
+                // bind descriptor set
+                unsafe {
+                    device.cmd_bind_descriptor_sets(
+                        buffer,
+                        vk::PipelineBindPoint::GRAPHICS,
+                        pipeline.layout,
+                        0,
+                        &descriptor_sets[i..=i],
+                        &[],
+                    )
+                };
 
-            // bind descriptor set
-            unsafe {
-                device.cmd_bind_descriptor_sets(
-                    buffer,
-                    vk::PipelineBindPoint::GRAPHICS,
-                    pipeline_layout,
-                    0,
-                    &descriptor_sets[i..=i],
-                    &[],
-                )
-            };
-
-            unsafe { device.cmd_draw_indexed(buffer, index_count as _, 1, 0, 0, 0) };
+                unsafe { device.cmd_draw_indexed(buffer, index_count as _, 1, 0, 0, 0) };
+            }
 
             // end render pass and command buffer
             unsafe {
@@ -1965,12 +1629,8 @@ impl VkApp {
             &self.swapchain_framebuffers,
             self.render_pass,
             self.swapchain_properties,
-            self.vertex_buffer,
-            self.index_buffer,
-            self.model_index_count,
-            self.pipeline_layout,
             &self.descriptor_sets,
-            self.pipeline,
+            &[self.pipeline_cubemap, self.pipeline],
         );
         Ok(())
     }
@@ -1983,34 +1643,19 @@ impl VkApp {
             model_extent.1,
         );
         self.model_extent = model_extent;
-        self.model_index_count = indices.len();
 
         self.wait_gpu_idle();
 
-        unsafe {
-            device.free_memory(self.index_buffer_memory, None);
-            device.destroy_buffer(self.index_buffer, None);
-            device.free_memory(self.vertex_buffer_memory, None);
-            device.destroy_buffer(self.vertex_buffer, None);
+        if let Some(g) = self.pipeline.geometry.take() {
+            unsafe { g.cleanup(device) };
         }
-
-        let (vertex_buffer, vertex_buffer_memory) = Self::create_buffer_with_data::<u32, _>(
+        self.pipeline.geometry = Some(Geometry::new(
             &self.vk_context,
             self.transient_command_pool,
             self.graphics_queue,
             &vertices,
-        );
-        let (index_buffer, index_buffer_memory) = Self::create_buffer_with_data::<u16, _>(
-            &self.vk_context,
-            self.transient_command_pool,
-            self.graphics_queue,
             &indices,
-        );
-
-        self.vertex_buffer = vertex_buffer;
-        self.vertex_buffer_memory = vertex_buffer_memory;
-        self.index_buffer = index_buffer;
-        self.index_buffer_memory = index_buffer_memory;
+        ));
 
         unsafe {
             device.free_command_buffers(self.command_pool, &self.command_buffers);
@@ -2022,35 +1667,31 @@ impl VkApp {
             &self.swapchain_framebuffers,
             self.render_pass,
             self.swapchain_properties,
-            vertex_buffer,
-            index_buffer,
-            self.model_index_count,
-            self.pipeline_layout,
             &self.descriptor_sets,
-            self.pipeline,
+            &[self.pipeline_cubemap, self.pipeline],
         );
     }
 
-    /// Recreates the swapchain.
+    /// Recreates the swapchain with new dimensions.
     ///
-    /// If the window has been resized, then the new size is used,
-    /// otherwise the size of the current swapchain is used.
+    /// #Panics
     ///
-    /// If the window has been minimized, then the functions block until the window is maximized.
-    /// This is because a width or height of 0 is not legal.
-    pub fn recreate_swapchain(&mut self) {
-        log::debug!("Recreating swapchain.");
+    /// Panics if either `width` or `height` is zero.
+    pub fn recreate_swapchain(&mut self, width: u32, height: u32) {
+        log::debug!("Recreating swapchain");
+        if width == 0 || height == 0 {
+            panic!("invalid dimensions: ({width}, {height})");
+        }
 
         self.wait_gpu_idle();
 
+        let geometry = self.pipeline.geometry.take();
+        let geometry_cubemap = self.pipeline_cubemap.geometry.take();
         self.cleanup_swapchain();
 
         let device = self.vk_context.device();
 
-        let dimensions = self.resize_dimensions.unwrap_or([
-            self.swapchain_properties.extent.width,
-            self.swapchain_properties.extent.height,
-        ]);
+        let dimensions = [width, height];
         let (swapchain, swapchain_khr, properties, images) = Self::create_swapchain_and_images(
             &self.vk_context,
             dimensions,
@@ -2059,7 +1700,7 @@ impl VkApp {
 
         let render_pass =
             Self::create_render_pass(device, properties, self.msaa_samples, self.depth_format);
-        let (pipeline, layout) = Self::create_pipeline(
+        let mut pipeline = Pipeline::new(
             device,
             properties,
             self.msaa_samples,
@@ -2067,6 +1708,17 @@ impl VkApp {
             self.descriptor_set_layout,
             self.shader_spv,
         );
+        pipeline.geometry = geometry;
+
+        let mut pipeline_cubemap = Pipeline::new(
+            device,
+            properties,
+            self.msaa_samples,
+            render_pass,
+            self.descriptor_set_layout,
+            self.cubemap_spv,
+        );
+        pipeline_cubemap.geometry = geometry_cubemap;
 
         let color_texture = Self::create_color_texture(
             &self.vk_context,
@@ -2100,12 +1752,8 @@ impl VkApp {
             &swapchain_framebuffers,
             render_pass,
             properties,
-            self.vertex_buffer,
-            self.index_buffer,
-            self.model_index_count,
-            layout,
             &self.descriptor_sets,
-            pipeline,
+            &[pipeline_cubemap, pipeline],
         );
 
         self.swapchain = swapchain;
@@ -2115,7 +1763,7 @@ impl VkApp {
         self.swapchain_image_views = swapchain_image_views;
         self.render_pass = render_pass;
         self.pipeline = pipeline;
-        self.pipeline_layout = layout;
+        self.pipeline_cubemap = pipeline_cubemap;
         self.color_texture = color_texture;
         self.depth_texture = depth_texture;
         self.swapchain_framebuffers = swapchain_framebuffers;
@@ -2132,8 +1780,8 @@ impl VkApp {
                 device.destroy_framebuffer(*framebuffer, None);
             }
             device.free_command_buffers(self.command_pool, &self.command_buffers);
-            device.destroy_pipeline(self.pipeline, None);
-            device.destroy_pipeline_layout(self.pipeline_layout, None);
+            self.pipeline.cleanup(&device);
+            self.pipeline_cubemap.cleanup(&device);
             device.destroy_render_pass(self.render_pass, None);
             for image_view in self.swapchain_image_views.iter() {
                 device.destroy_image_view(*image_view, None);
@@ -2143,8 +1791,7 @@ impl VkApp {
     }
 
     fn update_uniform_buffers(&mut self, current_image: u32) {
-        let aspect = self.swapchain_properties.extent.width as f32
-            / self.swapchain_properties.extent.height as f32;
+        let aspect = self.get_extent().width as f32 / self.get_extent().height as f32;
         let ubo = UniformBufferObject {
             model: self.model_matrix * self.initial_model_matrix,
             view: self.view_matrix,
@@ -2192,10 +1839,6 @@ impl Drop for VkApp {
             device.destroy_descriptor_set_layout(self.descriptor_set_layout, None);
             self.uniform_buffer_memories.iter().for_each(|m| device.free_memory(*m, None));
             self.uniform_buffers.iter().for_each(|b| device.destroy_buffer(*b, None));
-            device.free_memory(self.index_buffer_memory, None);
-            device.destroy_buffer(self.index_buffer, None);
-            device.free_memory(self.vertex_buffer_memory, None);
-            device.destroy_buffer(self.vertex_buffer, None);
             for mut texture in self.textures {
                 texture.destroy(device);
             }

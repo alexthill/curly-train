@@ -80,6 +80,7 @@ struct App {
     load_next_model: bool,
     load_next_image: bool,
     is_left_clicked: bool,
+    is_right_clicked: bool,
     cursor_position: Option<[i32; 2]>,
     cursor_delta: [i32; 2],
     wheel_delta: f32,
@@ -107,7 +108,11 @@ impl App {
             vert: include_bytes!(concat!(env!("OUT_DIR"), "/shader.vert.spv")),
             frag: include_bytes!(concat!(env!("OUT_DIR"), "/shader.frag.spv")),
         };
-        let vulkan = VkApp::new(&window, WIDTH, HEIGHT, &image_path, nobj, shader_spv)?;
+        let cubemap_spv = ShaderSpv {
+            vert: include_bytes!(concat!(env!("OUT_DIR"), "/cubemap.vert.spv")),
+            frag: include_bytes!(concat!(env!("OUT_DIR"), "/cubemap.frag.spv")),
+        };
+        let vulkan = VkApp::new(&window, WIDTH, HEIGHT, &image_path, nobj, shader_spv, cubemap_spv)?;
 
         self.vulkan = Some(vulkan);
         self.window = Some(window);
@@ -190,13 +195,15 @@ impl ApplicationHandler for App {
             WindowEvent::Resized { .. } => {
                 self.vulkan.as_mut().unwrap().dirty_swapchain = true;
             }
-            WindowEvent::MouseInput { button, state, .. } => {
-                self.is_left_clicked =
-                    state == ElementState::Pressed && button == MouseButton::Left;
+            WindowEvent::MouseInput { button: MouseButton::Left, state, .. } => {
+                self.is_left_clicked = state == ElementState::Pressed;
+            }
+            WindowEvent::MouseInput { button: MouseButton::Right, state, .. } => {
+                self.is_right_clicked = state == ElementState::Pressed;
             }
             WindowEvent::CursorMoved { position, .. } => {
                 let new_pos: (i32, i32) = position.into();
-                if self.is_left_clicked {
+                if self.is_left_clicked | self.is_right_clicked {
                     if let Some(old_pos) = self.cursor_position {
                         self.cursor_delta[0] += new_pos.0 - old_pos[0];
                         self.cursor_delta[1] += new_pos.1 - old_pos[1];
@@ -240,7 +247,7 @@ impl ApplicationHandler for App {
         if app.dirty_swapchain {
             let size = window.inner_size();
             if size.width > 0 && size.height > 0 {
-                app.recreate_swapchain();
+                app.recreate_swapchain(size.width, size.height);
             } else {
                 return;
             }
@@ -260,8 +267,14 @@ impl ApplicationHandler for App {
         let extent = app.get_extent();
         let x_ratio = self.cursor_delta[0] as f32 / extent.width as f32;
         let y_ratio = self.cursor_delta[1] as f32 / extent.height as f32;
-        app.model_matrix = Matrix4::from_angle_y(Deg(x_ratio * 180.)) * app.model_matrix;
-        app.model_matrix = Matrix4::from_angle_x(Deg(y_ratio * 180.)) * app.model_matrix;
+        if self.is_left_clicked {
+            app.model_matrix = Matrix4::from_angle_y(Deg(x_ratio * 180.)) * app.model_matrix;
+            app.model_matrix = Matrix4::from_angle_x(Deg(y_ratio * 180.)) * app.model_matrix;
+        }
+        if self.is_right_clicked {
+            app.view_matrix = Matrix4::from_angle_y(Deg(x_ratio * 180.)) * app.view_matrix;
+            app.view_matrix = Matrix4::from_angle_x(Deg(y_ratio * 180.)) * app.view_matrix;
+        }
         if self.toggle_rotate {
             app.model_matrix = Matrix4::from_angle_y(Deg(delta * -90.)) * app.model_matrix;
         }

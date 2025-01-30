@@ -12,7 +12,6 @@ layout(location = 0) in vec3 fragColor;
 layout(location = 1) in vec2 fragCoords;
 
 layout(binding = 1) uniform sampler2D texSampler;
-//layout(binding = 2) uniform samplerCube cubeSampler;
 
 layout(location = 0) out vec4 outColor;
 
@@ -33,6 +32,5 @@ void main() {
         1.0
     );
     vec4 tex = texture(texSampler, fragCoords);
-    //vec4 tex = texture(cubeSampler, vec3(1.0, 1.0, 1.0));
     outColor = mix(color, tex, ubo.texture_weight);
 }

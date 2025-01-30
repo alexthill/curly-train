@@ -5,6 +5,8 @@ fn main() {
     let shaders = vec![
         "shader.vert",
         "shader.frag",
+        "cubemap.vert",
+        "cubemap.frag",
     ];
 
     let src_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets").join("shaders");
