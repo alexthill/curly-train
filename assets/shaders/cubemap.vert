@@ -14,5 +14,5 @@ layout(location = 0) out vec3 fragDir;
 
 void main() {
     fragDir = vPosition;
-    gl_Position = ubo.proj * ubo.view * vec4(vPosition, 1.0);
+    gl_Position = ubo.proj * mat4(mat3(ubo.view)) * vec4(vPosition * 5.0, 1.0);
 }

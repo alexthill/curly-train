@@ -33,6 +33,7 @@ pub struct VkApp {
     pub view_matrix: Matrix4,
     pub model_matrix: Matrix4,
     pub texture_weight: f32,
+    pub cull_mode: vk::CullModeFlags,
     initial_model_matrix: Matrix4,
     model_extent: (Vector3, Vector3),
 
@@ -161,12 +162,12 @@ impl VkApp {
             command_pool,
             graphics_queue,
             [
-                "assets/cubemap/front.png",
-                "assets/cubemap/back.png",
-                "assets/cubemap/top.png",
-                "assets/cubemap/bottom.png",
                 "assets/cubemap/right.png",
                 "assets/cubemap/left.png",
+                "assets/cubemap/top.png",
+                "assets/cubemap/bottom.png",
+                "assets/cubemap/back.png",
+                "assets/cubemap/front.png",
             ],
         ).unwrap();
 
@@ -174,6 +175,7 @@ impl VkApp {
             let mut pipeline = Pipeline::new(
                 vk_context.device(),
                 properties,
+                vk::CullModeFlags::NONE,
                 msaa_samples,
                 render_pass,
                 descriptor_set_layout,
@@ -194,6 +196,7 @@ impl VkApp {
             let mut pipeline = Pipeline::new(
                 vk_context.device(),
                 properties,
+                vk::CullModeFlags::BACK,
                 msaa_samples,
                 render_pass,
                 descriptor_set_layout,
@@ -244,6 +247,7 @@ impl VkApp {
                 model_extent.1,
             ),
             texture_weight: 0.,
+            cull_mode: vk::CullModeFlags::NONE,
             model_extent,
             dirty_swapchain: false,
             vk_context,
@@ -753,7 +757,7 @@ impl VkApp {
                 .context("Failed to open image")?
                 .decode()
                 .context("Failed to decode image")?
-                .flipv();
+                .fliph();
             let image_as_rgb = image.to_rgba8();
             let width = image_as_rgb.width();
             let height = image_as_rgb.height();
@@ -783,8 +787,9 @@ impl VkApp {
         unsafe {
             for (i, image) in images.into_iter().enumerate() {
                 let offset = image_size * i as vk::DeviceSize;
+                println!("write image {i} at offset {offset}, {mem_size}");
                 let ptr = device.map_memory(memory, offset, image_size, vk::MemoryMapFlags::empty())
-                    .context("Failed to map memory for cubmap image")?;
+                    .context("Failed to map memory for cubemap image")?;
                 let mut align = ash::util::Align::new(ptr, align_of::<u8>() as _, mem_size);
                 align.copy_from_slice(&image);
                 device.unmap_memory(memory);
@@ -843,7 +848,7 @@ impl VkApp {
                 6,
             );
 
-            Self::copy_buffer_to_image(device, command_pool, copy_queue, buffer, image, extent);
+            Self::copy_buffer_to_image(device, command_pool, copy_queue, buffer, image, extent, 6);
 
             Self::generate_mipmaps(
                 vk_context,
@@ -853,6 +858,7 @@ impl VkApp {
                 extent,
                 vk::Format::R8G8B8A8_UNORM,
                 max_mip_levels,
+                6,
             );
         }
 
@@ -895,7 +901,7 @@ impl VkApp {
             .max_lod(max_mip_levels as _);
         let sampler = unsafe {
             device.create_sampler(&sampler_info, None)
-                .context("Failed to create sampler for texture")?
+                .context("Failed to create sampler for cubemap")?
         };
 
         Ok(Texture::new(image, image_memory, image_view, Some(sampler)))
@@ -964,7 +970,7 @@ impl VkApp {
                 1,
             );
 
-            Self::copy_buffer_to_image(device, command_pool, copy_queue, buffer, image, extent);
+            Self::copy_buffer_to_image(device, command_pool, copy_queue, buffer, image, extent, 1);
 
             Self::generate_mipmaps(
                 vk_context,
@@ -974,6 +980,7 @@ impl VkApp {
                 extent,
                 vk::Format::R8G8B8A8_UNORM,
                 max_mip_levels,
+                1,
             );
         }
 
@@ -1159,6 +1166,7 @@ impl VkApp {
         buffer: vk::Buffer,
         image: vk::Image,
         extent: vk::Extent2D,
+        layer_count: u32,
     ) {
         cmd::execute_one_time_commands(device, command_pool, transition_queue, |command_buffer| {
             let region = vk::BufferImageCopy::default()
@@ -1169,7 +1177,7 @@ impl VkApp {
                     aspect_mask: vk::ImageAspectFlags::COLOR,
                     mip_level: 0,
                     base_array_layer: 0,
-                    layer_count: 1,
+                    layer_count,
                 })
                 .image_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
                 .image_extent(vk::Extent3D {
@@ -1198,6 +1206,7 @@ impl VkApp {
         extent: vk::Extent2D,
         format: vk::Format,
         mip_levels: u32,
+        layer_count: u32,
     ) {
         let format_properties = unsafe {
             vk_context.instance()
@@ -1221,7 +1230,7 @@ impl VkApp {
                     .subresource_range(vk::ImageSubresourceRange {
                         aspect_mask: vk::ImageAspectFlags::COLOR,
                         base_array_layer: 0,
-                        layer_count: 1,
+                        layer_count,
                         level_count: 1,
                         ..Default::default()
                     });
@@ -1272,7 +1281,7 @@ impl VkApp {
                             aspect_mask: vk::ImageAspectFlags::COLOR,
                             mip_level: level - 1,
                             base_array_layer: 0,
-                            layer_count: 1,
+                            layer_count,
                         })
                         .dst_offsets([
                             vk::Offset3D { x: 0, y: 0, z: 0 },
@@ -1286,7 +1295,7 @@ impl VkApp {
                             aspect_mask: vk::ImageAspectFlags::COLOR,
                             mip_level: level,
                             base_array_layer: 0,
-                            layer_count: 1,
+                            layer_count,
                         });
                     let blits = [blit];
 
@@ -1674,7 +1683,7 @@ impl VkApp {
 
     /// Recreates the swapchain with new dimensions.
     ///
-    /// #Panics
+    /// # Panics
     ///
     /// Panics if either `width` or `height` is zero.
     pub fn recreate_swapchain(&mut self, width: u32, height: u32) {
@@ -1703,6 +1712,7 @@ impl VkApp {
         let mut pipeline = Pipeline::new(
             device,
             properties,
+            self.cull_mode,
             self.msaa_samples,
             render_pass,
             self.descriptor_set_layout,
@@ -1713,6 +1723,7 @@ impl VkApp {
         let mut pipeline_cubemap = Pipeline::new(
             device,
             properties,
+            vk::CullModeFlags::BACK,
             self.msaa_samples,
             render_pass,
             self.descriptor_set_layout,

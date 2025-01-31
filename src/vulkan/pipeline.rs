@@ -22,6 +22,7 @@ impl Pipeline {
     pub fn new(
         device: &Device,
         swapchain_properties: SwapchainProperties,
+        cull_mode: vk::CullModeFlags,
         msaa_samples: vk::SampleCountFlags,
         render_pass: vk::RenderPass,
         descriptor_set_layout: vk::DescriptorSetLayout,
@@ -30,6 +31,7 @@ impl Pipeline {
         let (pipeline, layout) = Self::create_pipeline(
             device,
             swapchain_properties,
+            cull_mode,
             msaa_samples,
             render_pass,
             descriptor_set_layout,
@@ -66,6 +68,7 @@ impl Pipeline {
     fn create_pipeline(
         device: &Device,
         swapchain_properties: SwapchainProperties,
+        cull_mode: vk::CullModeFlags,
         msaa_samples: vk::SampleCountFlags,
         render_pass: vk::RenderPass,
         descriptor_set_layout: vk::DescriptorSetLayout,
@@ -120,7 +123,7 @@ impl Pipeline {
             .rasterizer_discard_enable(false)
             .polygon_mode(vk::PolygonMode::FILL)
             .line_width(1.0)
-            .cull_mode(vk::CullModeFlags::NONE)
+            .cull_mode(cull_mode)
             .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
             .depth_bias_enable(false)
             .depth_bias_constant_factor(0.0)

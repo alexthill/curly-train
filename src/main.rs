@@ -4,6 +4,7 @@ use scop_lib::obj::NormalizedObj;
 use scop_lib::vulkan::{ShaderSpv, VkApp};
 
 use anyhow::Context;
+use ash::vk::CullModeFlags;
 use winit::{
     application::ApplicationHandler,
     dpi::PhysicalSize,
@@ -32,14 +33,16 @@ fn main() {
     println!("Run with RUST_LOG=debug to see logging output");
     println!();
     println!("Left-Click: rotate model with mouse");
+    println!("Right-Click: rotate camera with mouse");
     println!("Mouse-Wheel: zoom image");
     println!("WASD: move around");
-    println!("Space, Left-Shift: move up and down");
-    println!("<- ->: switch models");
+    println!("Space and Left-Shift: move up and down");
+    println!("← and →: switch models");
+    println!("C: switch cull modes between NONE, BACK and FRONT");
     println!("I: switch texture image");
+    println!("L: reset camera and object");
     println!("R: toggle rotate");
     println!("T: toggle between random colors and texture");
-    println!("L: reset camera and object");
     println!();
 
     env_logger::init();
@@ -166,8 +169,19 @@ impl ApplicationHandler for App {
                     KeyCode::ArrowRight if pressed => self.load_next_model = true,
                     _ => {}
                 }
-                match logical_key {
-                    Key::Character(key) if pressed && key == "f" => {
+                match (logical_key.as_ref(), pressed) {
+                    (Key::Character("c"), true) => {
+                        if let Some(vulkan) = self.vulkan.as_mut() {
+                            vulkan.cull_mode = match vulkan.cull_mode {
+                                CullModeFlags::NONE => CullModeFlags::BACK,
+                                CullModeFlags::BACK => CullModeFlags::FRONT,
+                                CullModeFlags::FRONT => CullModeFlags::NONE,
+                                other => other,
+                            };
+                            vulkan.dirty_swapchain = true;
+                        };
+                    }
+                    (Key::Character("f"), true) => {
                         let fullscreen = if self.is_fullscreen {
                             None
                         } else {
@@ -176,13 +190,10 @@ impl ApplicationHandler for App {
                         self.window.as_mut().unwrap().set_fullscreen(fullscreen);
                         self.is_fullscreen = !self.is_fullscreen;
                     }
-                    Key::Character(key) if pressed && key == "i"
-                        => self.load_next_image = true,
-                    Key::Character(key) if pressed && key == "r"
-                        => self.toggle_rotate = !self.toggle_rotate,
-                    Key::Character(key) if pressed && key == "l"
-                        => self.vulkan.as_mut().unwrap().reset_ubo(),
-                    Key::Character(key) if pressed && key == "t" => {
+                    (Key::Character("i"), true) => self.load_next_image = true,
+                    (Key::Character("r"), true) => self.toggle_rotate = !self.toggle_rotate,
+                    (Key::Character("l"), true) => self.vulkan.as_mut().unwrap().reset_ubo(),
+                    (Key::Character("t"), true) => {
                         self.tex_weight_change = if self.tex_weight_change == 0. {
                             0.5 // change will take 2 secs from 0 to 1
                         } else {
