@@ -19,6 +19,7 @@ use std::time::Instant;
 const WIDTH: u32 = 800;
 const HEIGHT: u32 = 600;
 const TITLE: &str = "scop";
+const TEXTURE_WEIGHT_CHANGE_SPEED: f32 = 0.5; // change will take 2 secs from 0 to 1
 
 fn check_if_obj(path: &Path) -> bool {
     path.extension().map(|ext| ext == "obj").unwrap_or_default()
@@ -38,6 +39,7 @@ fn main() {
     println!("WASD: move around");
     println!("Space and Left-Shift: move up and down");
     println!("← and →: switch models");
+    println!("B: toggle skybox");
     println!("C: switch cull modes between NONE, BACK and FRONT");
     println!("I: switch texture image");
     println!("L: reset camera and object");
@@ -169,17 +171,21 @@ impl ApplicationHandler for App {
                     KeyCode::ArrowRight if pressed => self.load_next_model = true,
                     _ => {}
                 }
+
+                let Some(vulkan) = self.vulkan.as_mut() else { return };
                 match (logical_key.as_ref(), pressed) {
+                    (Key::Character("b"), true) => {
+                        vulkan.show_cubemap = !vulkan.show_cubemap;
+                        vulkan.dirty_swapchain = true;
+                    }
                     (Key::Character("c"), true) => {
-                        if let Some(vulkan) = self.vulkan.as_mut() {
-                            vulkan.cull_mode = match vulkan.cull_mode {
-                                CullModeFlags::NONE => CullModeFlags::BACK,
-                                CullModeFlags::BACK => CullModeFlags::FRONT,
-                                CullModeFlags::FRONT => CullModeFlags::NONE,
-                                other => other,
-                            };
-                            vulkan.dirty_swapchain = true;
+                        vulkan.cull_mode = match vulkan.cull_mode {
+                            CullModeFlags::NONE => CullModeFlags::BACK,
+                            CullModeFlags::BACK => CullModeFlags::FRONT,
+                            CullModeFlags::FRONT => CullModeFlags::NONE,
+                            other => other,
                         };
+                        vulkan.dirty_swapchain = true;
                     }
                     (Key::Character("f"), true) => {
                         let fullscreen = if self.is_fullscreen {
@@ -190,12 +196,17 @@ impl ApplicationHandler for App {
                         self.window.as_mut().unwrap().set_fullscreen(fullscreen);
                         self.is_fullscreen = !self.is_fullscreen;
                     }
-                    (Key::Character("i"), true) => self.load_next_image = true,
+                    (Key::Character("i"), true) => {
+                        self.load_next_image = true;
+                        if vulkan.texture_weight == 0. || self.tex_weight_change < 0. {
+                            self.tex_weight_change = TEXTURE_WEIGHT_CHANGE_SPEED;
+                        }
+                    }
                     (Key::Character("r"), true) => self.toggle_rotate = !self.toggle_rotate,
-                    (Key::Character("l"), true) => self.vulkan.as_mut().unwrap().reset_ubo(),
+                    (Key::Character("l"), true) => vulkan.reset_ubo(),
                     (Key::Character("t"), true) => {
                         self.tex_weight_change = if self.tex_weight_change == 0. {
-                            0.5 // change will take 2 secs from 0 to 1
+                            TEXTURE_WEIGHT_CHANGE_SPEED
                         } else {
                             -self.tex_weight_change
                         };

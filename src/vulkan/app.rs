@@ -34,6 +34,7 @@ pub struct VkApp {
     pub model_matrix: Matrix4,
     pub texture_weight: f32,
     pub cull_mode: vk::CullModeFlags,
+    pub show_cubemap: bool,
     initial_model_matrix: Matrix4,
     model_extent: (Vector3, Vector3),
 
@@ -248,6 +249,7 @@ impl VkApp {
             ),
             texture_weight: 0.,
             cull_mode: vk::CullModeFlags::NONE,
+            show_cubemap: true,
             model_extent,
             dirty_swapchain: false,
             vk_context,
@@ -752,12 +754,11 @@ impl VkApp {
     ) -> Result<Texture, anyhow::Error> {
         let mut dims = None;
         let mut images = Vec::new();
-        for path in pathes {
+        for path in pathes.iter() {
             let image = ImageReader::open(path)
-                .context("Failed to open image")?
+                .with_context(|| format!("Failed to open image at {:?}", path.as_ref()))?
                 .decode()
-                .context("Failed to decode image")?
-                .fliph();
+                .with_context(|| format!("Failed to decode image at {:?}", path.as_ref()))?;
             let image_as_rgb = image.to_rgba8();
             let width = image_as_rgb.width();
             let height = image_as_rgb.height();
@@ -787,8 +788,8 @@ impl VkApp {
         unsafe {
             for (i, image) in images.into_iter().enumerate() {
                 let offset = image_size * i as vk::DeviceSize;
-                println!("write image {i} at offset {offset}, {mem_size}");
-                let ptr = device.map_memory(memory, offset, image_size, vk::MemoryMapFlags::empty())
+                let ptr = device
+                    .map_memory(memory, offset, image_size, vk::MemoryMapFlags::empty())
                     .context("Failed to map memory for cubemap image")?;
                 let mut align = ash::util::Align::new(ptr, align_of::<u8>() as _, mem_size);
                 align.copy_from_slice(&image);
@@ -1198,6 +1199,7 @@ impl VkApp {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn generate_mipmaps(
         vk_context: &VkContext,
         command_pool: vk::CommandPool,
@@ -1400,6 +1402,30 @@ impl VkApp {
         (buffers, memories)
     }
 
+    fn recreate_command_buffers(&mut self) {
+        let device = self.vk_context.device();
+        unsafe {
+            device.free_command_buffers(self.command_pool, &self.command_buffers);
+        }
+
+        let pipelines: &[Pipeline] = if self.show_cubemap {
+            // render cubemap after object for performance gain
+            // (avoids rendering the parts occluded by the object)
+            &[self.pipeline, self.pipeline_cubemap]
+        } else {
+            &[self.pipeline]
+        };
+        self.command_buffers = Self::create_and_register_command_buffers(
+            device,
+            self.command_pool,
+            &self.swapchain_framebuffers,
+            self.render_pass,
+            self.swapchain_properties,
+            &self.descriptor_sets,
+            pipelines,
+        );
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn create_and_register_command_buffers(
         device: &Device,
@@ -1415,7 +1441,6 @@ impl VkApp {
             .level(vk::CommandBufferLevel::PRIMARY)
             .command_buffer_count(framebuffers.len() as _);
         let buffers = unsafe { device.allocate_command_buffers(&allocate_info).unwrap() };
-        log::debug!("create_and_register_command_buffers with count {}", buffers.len());
 
         for (i, &buffer) in buffers.iter().enumerate() {
             // begin command buffer
@@ -1628,19 +1653,7 @@ impl VkApp {
             unsafe { device.update_descriptor_sets(&[sampler_descriptor_write], &[]) }
         }
 
-        unsafe {
-            device.free_command_buffers(self.command_pool, &self.command_buffers);
-        }
-
-        self.command_buffers = Self::create_and_register_command_buffers(
-            device,
-            self.command_pool,
-            &self.swapchain_framebuffers,
-            self.render_pass,
-            self.swapchain_properties,
-            &self.descriptor_sets,
-            &[self.pipeline_cubemap, self.pipeline],
-        );
+        self.recreate_command_buffers();
         Ok(())
     }
 
@@ -1666,19 +1679,7 @@ impl VkApp {
             &indices,
         ));
 
-        unsafe {
-            device.free_command_buffers(self.command_pool, &self.command_buffers);
-        }
-
-        self.command_buffers = Self::create_and_register_command_buffers(
-            device,
-            self.command_pool,
-            &self.swapchain_framebuffers,
-            self.render_pass,
-            self.swapchain_properties,
-            &self.descriptor_sets,
-            &[self.pipeline_cubemap, self.pipeline],
-        );
+        self.recreate_command_buffers();
     }
 
     /// Recreates the swapchain with new dimensions.
@@ -1757,16 +1758,6 @@ impl VkApp {
             properties,
         );
 
-        let command_buffers = Self::create_and_register_command_buffers(
-            device,
-            self.command_pool,
-            &swapchain_framebuffers,
-            render_pass,
-            properties,
-            &self.descriptor_sets,
-            &[pipeline_cubemap, pipeline],
-        );
-
         self.swapchain = swapchain;
         self.swapchain_khr = swapchain_khr;
         self.swapchain_properties = properties;
@@ -1778,7 +1769,7 @@ impl VkApp {
         self.color_texture = color_texture;
         self.depth_texture = depth_texture;
         self.swapchain_framebuffers = swapchain_framebuffers;
-        self.command_buffers = command_buffers;
+        self.recreate_command_buffers();
     }
 
     /// Clean up the swapchain and all resources that depend on it.
@@ -1790,9 +1781,8 @@ impl VkApp {
             for framebuffer in self.swapchain_framebuffers.iter() {
                 device.destroy_framebuffer(*framebuffer, None);
             }
-            device.free_command_buffers(self.command_pool, &self.command_buffers);
-            self.pipeline.cleanup(&device);
-            self.pipeline_cubemap.cleanup(&device);
+            self.pipeline.cleanup(device);
+            self.pipeline_cubemap.cleanup(device);
             device.destroy_render_pass(self.render_pass, None);
             for image_view in self.swapchain_image_views.iter() {
                 device.destroy_image_view(*image_view, None);
@@ -1806,7 +1796,7 @@ impl VkApp {
         let ubo = UniformBufferObject {
             model: self.model_matrix * self.initial_model_matrix,
             view: self.view_matrix,
-            proj: math::perspective(Deg(45.0), aspect, 0.1, 10.0),
+            proj: math::perspective(Deg(75.0), aspect, 0.1, 20.0),
             texture_weight: self.texture_weight,
         };
         let ubos = [ubo];
@@ -1848,11 +1838,16 @@ impl Drop for VkApp {
         unsafe {
             device.destroy_descriptor_pool(self.descriptor_pool, None);
             device.destroy_descriptor_set_layout(self.descriptor_set_layout, None);
-            self.uniform_buffer_memories.iter().for_each(|m| device.free_memory(*m, None));
-            self.uniform_buffers.iter().for_each(|b| device.destroy_buffer(*b, None));
+            for &mem in &self.uniform_buffer_memories {
+                device.free_memory(mem, None);
+            }
+            for &buffer in &self.uniform_buffers {
+                device.destroy_buffer(buffer, None);
+            }
             for mut texture in self.textures {
                 texture.destroy(device);
             }
+            device.free_command_buffers(self.command_pool, &self.command_buffers);
             device.destroy_command_pool(self.transient_command_pool, None);
             device.destroy_command_pool(self.command_pool, None);
         }
