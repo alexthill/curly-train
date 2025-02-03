@@ -1360,15 +1360,25 @@ impl VkApp {
     fn load_model(nobj: NormalizedObj) -> (Vec<Vertex>, Vec<u32>, (Vector3, Vector3)) {
         let mut min = Vector3::new(f32::MAX);
         let mut max = Vector3::new(f32::MIN);
-        let vertices = nobj.vertices.iter().map(|vertex| {
+        for vertex in &nobj.vertices {
             for (i, &coord) in vertex.pos_coords.iter().enumerate() {
                 min[i] = min[i].min(coord);
                 max[i] = max[i].max(coord);
             }
+        }
+        let x_middle = (max.x() + min.x()) / 2.;
+        let vertices = nobj.vertices.iter().map(|vertex| {
             let tex_coords = if nobj.has_tex_coords {
                 vertex.tex_coords
             } else {
-                [vertex.pos_coords[2], vertex.pos_coords[1]]
+                let mut coords = [
+                    vertex.pos_coords[2],
+                    vertex.pos_coords[1],
+                ];
+                if vertex.pos_coords[0] > x_middle {
+                    coords[0] += max.z() - min.z();
+                }
+                coords
             };
             Vertex {
                 pos: vertex.pos_coords,
